@@ -16,32 +16,27 @@ namespace renderer
 
         const void* key = static_cast<const void*>(shader);
 
+        auto it = m_cache.find(key);
+        if (it != m_cache.end())
         {
-            std::lock_guard lock(m_mutex);
-            auto it = m_cache.find(key);
-            if (it != m_cache.end())
-            {
-                ++m_hits;
-                return &it->second;
-            }
+            ++m_hits;
+            return &it->second;
         }
 
         UINT size = 0;
         if (FAILED(shader->GetFunction(nullptr, &size)) || size == 0 || size > 65536)
         {
-            std::lock_guard lock(m_mutex);
-            auto [it, inserted] = m_cache.emplace(key, ShaderInfo{});
+            auto [iter, inserted] = m_cache.emplace(key, ShaderInfo{});
             ++m_misses;
-            return &it->second;
+            return &iter->second;
         }
 
         std::vector<BYTE> bytes(size);
         if (FAILED(shader->GetFunction(bytes.data(), &size)))
         {
-            std::lock_guard lock(m_mutex);
-            auto [it, inserted] = m_cache.emplace(key, ShaderInfo{});
+            auto [iter, inserted] = m_cache.emplace(key, ShaderInfo{});
             ++m_misses;
-            return &it->second;
+            return &iter->second;
         }
 
         uint64_t hash = 14695981039346656037ull;
@@ -58,10 +53,9 @@ namespace renderer
         info.isKnownWater = (hash == 0x17f042a7906ca126ull || hash == 0x7d4f078fa1876a09ull ||
                              hash == 0x206d861fd0a721ddull || hash == 0xfdd9528ed3ac30eaull);
 
-        std::lock_guard lock(m_mutex);
         ++m_misses;
-        auto [it, inserted] = m_cache.emplace(key, info);
-        return &it->second;
+        auto [iter, inserted] = m_cache.emplace(key, info);
+        return &iter->second;
     }
 
     uint64_t ShaderCache::GetShaderHash(IDirect3DVertexShader9* vs)
@@ -88,7 +82,6 @@ namespace renderer
 
     void ShaderCache::Clear()
     {
-        std::lock_guard lock(m_mutex);
         m_cache.clear();
     }
 }

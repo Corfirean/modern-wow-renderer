@@ -180,15 +180,21 @@ SetPixelShaderFn originalSetPixelShader = nullptr;
 
 HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* vs)
 {
-    renderer::g_trackedState.currentVS = vs;
-    renderer::g_trackedState.vsHash = vs ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
+    if (renderer::g_trackedState.currentVS != vs)
+    {
+        renderer::g_trackedState.currentVS = vs;
+        renderer::g_trackedState.vsHash = vs ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
+    }
     return originalSetVertexShader(d, vs);
 }
 
 HRESULT WINAPI HookedSetPixelShader(IDirect3DDevice9* d, IDirect3DPixelShader9* ps)
 {
-    renderer::g_trackedState.currentPS = ps;
-    renderer::g_trackedState.psHash = ps ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
+    if (renderer::g_trackedState.currentPS != ps)
+    {
+        renderer::g_trackedState.currentPS = ps;
+        renderer::g_trackedState.psHash = ps ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
+    }
     return originalSetPixelShader(d, ps);
 }
 

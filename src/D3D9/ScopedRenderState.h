@@ -25,6 +25,8 @@ namespace renderer
             m_device->GetPixelShader(m_ps.GetAddressOf());
             m_device->GetFVF(&m_fvf);
             m_device->GetVertexDeclaration(m_vdecl.GetAddressOf());
+            m_device->GetStreamSource(0, m_stream0.GetAddressOf(), &m_streamOffset, &m_streamStride);
+            m_device->GetIndices(m_indices.GetAddressOf());
 
             // Textures & Samplers for stages 0..3
             for (DWORD s = 0; s < 4; ++s)
@@ -110,8 +112,12 @@ namespace renderer
             m_device->SetPixelShader(m_ps.Get());
             if (m_vdecl)
                 m_device->SetVertexDeclaration(m_vdecl.Get());
-            else if (m_fvf != 0)
+            if (m_fvf != 0)
                 m_device->SetFVF(m_fvf);
+
+            // Restore Stream source & Indices
+            m_device->SetStreamSource(0, m_stream0.Get(), m_streamOffset, m_streamStride);
+            m_device->SetIndices(m_indices.Get());
 
             // Restore Viewport, Target & Depth
             m_device->SetViewport(&m_vp);
@@ -131,6 +137,10 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_ps;
         DWORD m_fvf = 0;
         ComPtr<IDirect3DVertexDeclaration9> m_vdecl;
+        ComPtr<IDirect3DVertexBuffer9> m_stream0;
+        UINT m_streamOffset = 0;
+        UINT m_streamStride = 0;
+        ComPtr<IDirect3DIndexBuffer9> m_indices;
 
         ComPtr<IDirect3DBaseTexture9> m_tex[4];
         struct SamplerStateBackup

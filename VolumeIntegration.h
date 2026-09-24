@@ -324,8 +324,20 @@ HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** out) {
     return renderer::DepthCapture::Instance().HookGetDepth(d, out);
 }
 
+inline UINT cameraCaptureAttempts = 0;
+
+inline bool HasActiveEffects() {
+    bool hasContact = (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0);
+    bool hasFog = (!shaftDebug && fogEffectEnabled);
+    bool hasVolumetric = renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
+    bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
+    bool hasPost = (legacyShaders.postProcess && (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0));
+    return hasContact || hasFog || hasVolumetric || hasGlare || hasPost;
+}
+
 void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
     if (!enabled || !active || internal) return;
+    cameraCaptureAttempts = 0;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
     renderer::DepthCapture::Instance().BeforeClear(d, count, flags, z);
     depth = renderer::DepthCapture::Instance().GetDepthTexture();
@@ -585,6 +597,8 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
 }
 
 bool Composite(IDirect3DDevice9* d) {
+    if (!HasActiveEffects()) return true;
+
     renderer::ScopedCpuTimer totalTimer(renderer::PerfStage::TotalInjectedFrame);
     renderer::ScopedCpuTimer compTimer(renderer::PerfStage::LegacyComposite);
 
@@ -956,31 +970,31 @@ void BeforeDraw(IDirect3DDevice9* d) {
 
     if (ready && !isUi) return;
 
-    try {
-        ComPtr<IDirect3DSurface9> rt, ds;
-        if (FAILED(d->GetRenderTarget(0, rt.GetAddressOf())) || rt.Get() != target.Get() || FAILED(getDepth(d, ds.GetAddressOf()))) return;
-        cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
-        if (!ready && ds.Get() == surface.Get()) {
+    if (!ready && cameraCaptureAttempts < 16 && renderer::g_trackedState.currentVS != nullptr) {
+        ++cameraCaptureAttempts;
+        ComPtr<IDirect3DSurface9> ds;
+        if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
+            cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
             ready = CaptureCamera(d);
             if (ready) ++cameraFrames;
         }
-        if (!ready || !isUi) return;
-        composed = true;
-        if (Composite(d)) {
-            ++applied;
-            if (applied == 1) Log("composited before captured UI shader; height fog + screen-space shafts");
-        }
-        else {
-            ready = false; composed = false;
-            Log("composite failed; frame skipped");
-        }
     }
-    catch (...) {
-        Log("draw preparation failed; frame skipped");
+
+    if (!ready || !isUi) return;
+
+    composed = true;
+    if (Composite(d)) {
+        ++applied;
+        if (applied == 1) Log("composited before captured UI shader; height fog + screen-space shafts");
+    }
+    else {
+        ready = false; composed = false;
+        Log("composite failed; frame skipped");
     }
 }
 
 void Present(IDirect3DDevice9* d) {
+    cameraCaptureAttempts = 0;
     if (enabled && active && !composed && ready) {
         composed = true;
         Composite(d);

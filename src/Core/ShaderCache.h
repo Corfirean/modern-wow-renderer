@@ -39,7 +39,6 @@ namespace renderer
         const ShaderInfo* FetchOrCreate(T* shader);
 
         std::unordered_map<const void*, ShaderInfo> m_cache;
-        mutable std::mutex m_mutex;
         uint64_t m_hits = 0;
         uint64_t m_misses = 0;
     };
