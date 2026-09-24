@@ -11,6 +11,26 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <PropertyGroup><TargetName>d3d9</TargetName><OutDir>$(SolutionDir)build\$(Configuration)\</OutDir><IntDir>$(SolutionDir)build\obj\$(Configuration)\</IntDir></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><AdditionalDependencies>d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies><ModuleDefinitionFile>$(ProjectDir)d3d9.def</ModuleDefinitionFile></Link><PostBuildEvent><Command>copy /Y "$(ProjectDir)ModernWoWRenderer.ini" "$(OutDir)ModernWoWRenderer.ini"</Command></PostBuildEvent></ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="ModernWoWRenderer.cpp" /><None Include="d3d9.def" /><None Include="ModernWoWRenderer.ini" /></ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="ModernWoWRenderer.cpp" />
+    <ClCompile Include="src\Core\FrameContext.cpp" />
+    <ClCompile Include="src\Core\ShaderCache.cpp" />
+    <ClCompile Include="src\Diagnostics\RendererDiagnostics.cpp" />
+    <ClCompile Include="src\Scene\DrawCallClassifier.cpp" />
+    <ClCompile Include="src\D3D9\DepthCapture.cpp" />
+    <ClCompile Include="src\D3D9\CameraCapture.cpp" />
+    <ClInclude Include="src\Core\MathTypes.h" />
+    <ClInclude Include="src\Core\FrameContext.h" />
+    <ClInclude Include="src\Core\ShaderCache.h" />
+    <ClInclude Include="src\Scene\MaterialType.h" />
+    <ClInclude Include="src\Scene\DrawCallContext.h" />
+    <ClInclude Include="src\Scene\DrawCallClassifier.h" />
+    <ClInclude Include="src\Diagnostics\RendererDiagnostics.h" />
+    <ClInclude Include="src\D3D9\DepthCapture.h" />
+    <ClInclude Include="src\D3D9\CameraCapture.h" />
+    <None Include="d3d9.def" />
+    <None Include="ModernWoWRenderer.ini" />
+    <None Include="GraphicsEffects.ini" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

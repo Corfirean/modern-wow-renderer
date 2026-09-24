@@ -17,6 +17,9 @@ IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
 float reflectionData[12]{};
 std::vector<DWORD> code,vertexCode;
+inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
+inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
+inline IDirect3DDevice9* cachedShaderDevice = nullptr;
 bool showStatus=true;
 unsigned frameMatches=0;
 std::wstring logPath;
@@ -279,6 +282,13 @@ void Present() {
     keyDown=down;
     frameMatches=0;
 }
+inline void Reset(IDirect3DDevice9* d) {
+    if(cachedShaderDevice == d) {
+        cachedReplacementPS.Reset();
+        cachedReplacementVS.Reset();
+        cachedShaderDevice = nullptr;
+    }
+}
 void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0) noexcept {
     if(!external&&(!enabled||!showStatus))return;
     try {
@@ -336,8 +346,15 @@ struct Scope {
             controls[1]=wavesEnabled?strength:0;controls[2]=wavesEnabled?normalStrength:0;
             controls[32]=wavesEnabled?swellStrength:0;controls[33]=sunGlintEnabled?sunGlintStrength:0;controls[34]=fresnelStrength;controls[35]=foamEnabled?crestFoamStrength:0;
             float vertexControls[4]={controls[0],geometryWavesEnabled?geometryWaveAmplitude:0,wavesEnabled?swellStrength:0,0};
-            if(FAILED(d->CreatePixelShader(code.data(),replacement.GetAddressOf())))return;
-            if(FAILED(d->CreateVertexShader(vertexCode.data(),replacementVertex.GetAddressOf())))return;
+            if(cachedShaderDevice != d || !cachedReplacementPS || !cachedReplacementVS) {
+                cachedReplacementPS.Reset();
+                cachedReplacementVS.Reset();
+                cachedShaderDevice = d;
+                if(FAILED(d->CreatePixelShader(code.data(), cachedReplacementPS.GetAddressOf()))) return;
+                if(FAILED(d->CreateVertexShader(vertexCode.data(), cachedReplacementVS.GetAddressOf()))) return;
+            }
+            replacement = cachedReplacementPS;
+            replacementVertex = cachedReplacementVS;
             const D3DSAMPLERSTATETYPE samplerStates[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};
             if(reflectionScene&&reflectionDepth){
                 for(unsigned slot=0;slot<2;++slot){if(FAILED(d->GetTexture(2+slot,oldExtraTextures[slot].GetAddressOf())))return;for(unsigned state=0;state<6;++state)if(FAILED(d->GetSamplerState(2+slot,samplerStates[state],&oldSampler[slot][state])))return;}

@@ -16,6 +16,12 @@
 #include "VolumeIntegration.h"
 #include "WaterReflection.h"
 #include "TuningOverlay.h"
+#include "src/Core/ShaderCache.h"
+#include "src/Core/FrameContext.h"
+#include "src/Diagnostics/RendererDiagnostics.h"
+#include "src/D3D9/DepthCapture.h"
+#include "src/D3D9/CameraCapture.h"
+#include "src/Scene/DrawCallClassifier.h"
 
 namespace
 {
@@ -140,18 +146,65 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     waterhighlight::Present();
     watereffect::Present();
     distancefog::Present();
-    waterdiag::Present(d); return originalPresent(d,a,b,w,r);
+    waterdiag::Present(d);
+    renderer::RendererDiagnostics::Instance().OnFrameEnd();
+    return originalPresent(d,a,b,w,r);
 }
 HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     waterreflection::Reset(d);
     volume::Reset(d);
-    waterdiag::Reset(d); return originalReset(d,p);
+    watereffect::Reset(d);
+    waterdiag::Reset(d);
+    renderer::ShaderCache::Instance().Clear();
+    renderer::DrawCallClassifier::Instance().ClearCache();
+    renderer::DepthCapture::Instance().Reset(d);
+    renderer::CameraCapture::Instance().Reset();
+    return originalReset(d,p);
 }
 HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
+    renderer::RendererDiagnostics::Instance().OnFrameBegin();
     volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
+}
+renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT n)
+{
+    renderer::DrawCallContext ctx;
+    ctx.primitiveType = t;
+    ctx.primitiveCount = n;
+
+    IDirect3DVertexShader9* vs = nullptr;
+    if (SUCCEEDED(d->GetVertexShader(&vs)) && vs)
+    {
+        ctx.vertexShader = vs;
+        ctx.vsHash = renderer::ShaderCache::Instance().GetShaderHash(vs);
+        vs->Release();
+    }
+
+    IDirect3DPixelShader9* ps = nullptr;
+    if (SUCCEEDED(d->GetPixelShader(&ps)) && ps)
+    {
+        ctx.pixelShader = ps;
+        ctx.psHash = renderer::ShaderCache::Instance().GetShaderHash(ps);
+        ps->Release();
+    }
+
+    DWORD alphaBlend = 0, alphaTest = 0, zWrite = 1, zEnable = 1;
+    d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
+    d->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
+    d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
+    d->GetRenderState(D3DRS_ZENABLE, &zEnable);
+    ctx.alphaBlend = (alphaBlend != 0);
+    ctx.alphaTest = (alphaTest != 0);
+    ctx.zWrite = (zWrite != 0);
+    ctx.zEnable = (zEnable != 0);
+
+    auto dc = renderer::DrawCallClassifier::Instance().Classify(
+        d, ctx, volume::capturedViewTranslation, volume::capturedViewValid, volume::cameraCaptureShaderHash);
+    renderer::RendererDiagnostics::Instance().RecordDrawCall(dc);
+    return dc;
 }
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
     if(volume::internal)return originalDraw(d,t,start,n);
+    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDraw(d,t,start,n);});
     if(!g_drawingOverlay)waterreflection::Prepare(d);
@@ -163,6 +216,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
 }
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
     if(!g_drawingOverlay)waterreflection::Prepare(d);
@@ -174,6 +228,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
 }
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
     if(volume::internal)return originalDrawUP(d,t,n,v,stride);
+    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawUP(d,t,n,v,stride);});
     if(!g_drawingOverlay)waterreflection::Prepare(d);
@@ -185,6 +240,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
 }
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
     if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
     if(!g_drawingOverlay)waterreflection::Prepare(d);
@@ -229,6 +285,7 @@ void HookDevice(IDirect3DDevice9* device)
     if(volume::enabled){
         volume::setDepth=reinterpret_cast<volume::SetDepthFn>(table[39]);
         volume::getDepth=reinterpret_cast<volume::GetDepthFn>(table[40]);
+        renderer::DepthCapture::Instance().SetFunctions(volume::setDepth, volume::getDepth);
         originalClear=reinterpret_cast<ClearFn>(table[43]);
         InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
         InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
@@ -305,6 +362,7 @@ void Initialize()
     volume::Configure(g_basePath);
     waterreflection::Configure(g_basePath);
     tuningoverlay::Configure(g_basePath);
+    renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
     unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
     if(unified){watereffect::hotkey=false;distancefog::hotkey=false;g_settings.enabled=false;
         graphicsShowStatus=GetPrivateProfileIntW(L"Graphics",L"ShowStatus",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;

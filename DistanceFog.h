@@ -1,4 +1,6 @@
 #pragma once
+#include <wrl/client.h>
+#include "src/Core/ShaderCache.h"
 namespace distancefog {
 bool enabled=false,active=true,keyDown=false,showStatus=true,hotkey=true,effectEnabled=true;
 float distanceScale=1.2f,powerScale=1.08f;
@@ -28,9 +30,8 @@ struct Scope {
         try {
             Microsoft::WRL::ComPtr<IDirect3DVertexShader9> vs;
             if(FAILED(d->GetVertexShader(vs.GetAddressOf()))||!vs)return;
-            UINT size=0;if(FAILED(vs->GetFunction(nullptr,&size))||!size||size>65536)return;
-            std::vector<BYTE> bytes(size);if(FAILED(vs->GetFunction(bytes.data(),&size)))return;
-            uint64_t hash=14695981039346656037ull;for(BYTE b:bytes){hash^=b;hash*=1099511628211ull;}
+            uint64_t hash = renderer::ShaderCache::Instance().GetShaderHash(vs.Get());
+            if(!hash)return;
             // Registers verified from captured shader instructions, not guessed globally.
             switch(hash) {
             case 0xb598fbc887a39675ull:case 0x512e5caf066afb4bull:case 0xbd0060eb34ea4a7cull:reg=12;break;

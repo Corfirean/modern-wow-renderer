@@ -1,5 +1,7 @@
 #pragma once
 #include <d3dcompiler.h>
+#include <wrl/client.h>
+#include "src/Core/ShaderCache.h"
 #pragma comment(lib,"d3dcompiler.lib")
 
 namespace waterhighlight {
@@ -45,14 +47,7 @@ struct Scope {
         if(skip||!enabled||!visible)return;
         try {
             if(FAILED(d->GetPixelShader(original.GetAddressOf())))return;
-            uint64_t hash=0;
-            if(original) {
-                UINT size=0;
-                if(FAILED(original->GetFunction(nullptr,&size))||!size||size>65536)return;
-                std::vector<BYTE> bytes(size);
-                if(FAILED(original->GetFunction(bytes.data(),&size)))return;
-                hash=14695981039346656037ull;for(BYTE b:bytes){hash^=b;hash*=1099511628211ull;}
-            }
+            uint64_t hash = original ? renderer::ShaderCache::Instance().GetShaderHash(original.Get()) : 0;
             bool match=(group==0&&hash==firstHash)||(group==1&&hash==0xe56e7f7bd7a96a88ull)||(group==3&&hash==0x17f042a7906ca126ull);
             if(group==2&&!original) {
                 ComPtr<IDirect3DVertexShader9> vs;

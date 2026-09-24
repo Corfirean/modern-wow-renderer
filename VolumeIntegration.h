@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <unordered_set>
 #include <unordered_map>
+#include "src/Core/ShaderCache.h"
+#include "src/Diagnostics/RendererDiagnostics.h"
+#include "src/D3D9/DepthCapture.h"
+#include "src/D3D9/CameraCapture.h"
+#include "src/Scene/DrawCallClassifier.h"
 namespace volume {
 using Microsoft::WRL::ComPtr;
 using SetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*);
@@ -91,49 +96,45 @@ void Configure(const std::wstring& base){
 // Frame-scoped DEFAULT resources: never keep a depth reference across Present/Reset.
 void Finish(IDirect3DDevice9* d){
  if(owner&&owner!=d)return;
- if(owner){ComPtr<IDirect3DSurface9> current;if(SUCCEEDED(getDepth(d,current.GetAddressOf()))&&current.Get()==surface.Get())setDepth(d,originalDepth.Get());}
+ renderer::DepthCapture::Instance().OnFrameEnd(d);
  resources.sceneSurface.Reset();resources.scene.Reset();resources.localASurface.Reset();resources.localBSurface.Reset();resources.localA.Reset();resources.localB.Reset();resources.rayASurface.Reset();resources.rayBSurface.Reset();resources.rayA.Reset();resources.rayB.Reset();
  surface.Reset();depth.Reset();originalDepth.Reset();target.Reset();owner=nullptr;ready=false;composed=false;
 }
 void Reset(IDirect3DDevice9* d){
- Finish(d);resources.rayHistorySurface.Reset();resources.rayHistory.Reset();resources.historyOwner=nullptr;resources.historyWidth=resources.historyHeight=0;resources.historyValid=false;resources.shadowDepthSurface.Reset();resources.shadowColorSurface.Reset();resources.shadowDepth.Reset();resources.shadowColor.Reset();resources.shadowOwner=nullptr;resources.shadowSize=0;shadowFrameStarted=shadowFrameValid=false;stableShadowLightValid=false;shadowCacheValid=shadowAnchorValid=false;
+ Finish(d);
+ renderer::DepthCapture::Instance().Reset(d);
+ renderer::CameraCapture::Instance().Reset();
+ renderer::ShaderCache::Instance().Clear();
+ renderer::DrawCallClassifier::Instance().ClearCache();
+ resources.rayHistorySurface.Reset();resources.rayHistory.Reset();resources.historyOwner=nullptr;resources.historyWidth=resources.historyHeight=0;resources.historyValid=false;resources.shadowDepthSurface.Reset();resources.shadowColorSurface.Reset();resources.shadowDepth.Reset();resources.shadowColor.Reset();resources.shadowOwner=nullptr;resources.shadowSize=0;shadowFrameStarted=shadowFrameValid=false;stableShadowLightValid=false;shadowCacheValid=shadowAnchorValid=false;
 }
-HRESULT WINAPI SetDepth(IDirect3DDevice9* d,IDirect3DSurface9* s){return setDepth(d,owner==d&&s&&s==originalDepth.Get()?surface.Get():s);}
+HRESULT WINAPI SetDepth(IDirect3DDevice9* d,IDirect3DSurface9* s){
+ return renderer::DepthCapture::Instance().HookSetDepth(d,s);
+}
 HRESULT WINAPI GetDepth(IDirect3DDevice9* d,IDirect3DSurface9** out){
- HRESULT hr=getDepth(d,out);
- if(SUCCEEDED(hr)&&out&&owner==d&&*out==surface.Get()&&originalDepth){(*out)->Release();*out=originalDepth.Get();(*out)->AddRef();}
- return hr;
+ return renderer::DepthCapture::Instance().HookGetDepth(d,out);
 }
 void BeforeClear(IDirect3DDevice9* d,DWORD count,DWORD flags,float z){
- if(!enabled||!active||internal||!(flags&D3DCLEAR_ZBUFFER))return;
- if(owner==d){ComPtr<IDirect3DSurface9> current;if(SUCCEEDED(getDepth(d,current.GetAddressOf()))&&current.Get()==surface.Get())ready=false;return;}
- if(count||z!=1||owner)return;
- ComPtr<IDirect3DSurface9> rt,back,ds;
- D3DSURFACE_DESC desc{},rd{};D3DVIEWPORT9 vp{};
- if(FAILED(d->GetRenderTarget(0,rt.GetAddressOf()))||FAILED(d->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,back.GetAddressOf()))||rt.Get()!=back.Get())return;
- if(FAILED(getDepth(d,ds.GetAddressOf()))||!ds||FAILED(ds->GetDesc(&desc))||FAILED(rt->GetDesc(&rd))||FAILED(d->GetViewport(&vp)))return;
- if(desc.MultiSampleType!=D3DMULTISAMPLE_NONE||desc.Width!=rd.Width||desc.Height!=rd.Height||vp.X||vp.Y||vp.Width!=rd.Width||vp.Height!=rd.Height)return;
- if(desc.Format!=D3DFMT_D24X8&&desc.Format!=D3DFMT_D24S8)return;
- ComPtr<IDirect3DTexture9> tex;ComPtr<IDirect3DSurface9> replacement;
- if(FAILED(d->CreateTexture(desc.Width,desc.Height,1,D3DUSAGE_DEPTHSTENCIL,static_cast<D3DFORMAT>(MAKEFOURCC('I','N','T','Z')),D3DPOOL_DEFAULT,tex.GetAddressOf(),nullptr))||FAILED(tex->GetSurfaceLevel(0,replacement.GetAddressOf()))||FAILED(setDepth(d,replacement.Get())))return;
- depth=tex;surface=replacement;originalDepth=ds;target=rt;owner=d;++depthFrames;
- shadowFrameStarted=false;shadowFrameValid=false;shadowFrameDraws=0;
+ if(!enabled||!active||internal)return;
+ renderer::DepthCapture::Instance().BeforeClear(d,count,flags,z);
+ depth=renderer::DepthCapture::Instance().GetDepthTexture();
+ surface=renderer::DepthCapture::Instance().GetDepthSurface();
+ originalDepth=renderer::DepthCapture::Instance().GetOriginalDepth();
+ target=renderer::DepthCapture::Instance().GetRenderTarget();
+ owner=renderer::DepthCapture::Instance().GetOwner();
+ depthFrames=renderer::DepthCapture::Instance().GetDepthFrames();
+ if(renderer::DepthCapture::Instance().HasDepth()){
+  shadowFrameStarted=false;shadowFrameValid=false;shadowFrameDraws=0;
+ }
 }
 template<class T> uint64_t Hash(T* shader){
  if(!shader)return 0;
- // The game reuses the same handful of compiled shader objects for essentially
- // every draw call of a given material; re-fetching and re-hashing the full
- // bytecode (a heap alloc + byte-by-byte FNV pass) on every single opaque draw
- // call, every frame, was the dominant per-frame cost once the shadow pass
- // stopped capping how many casters it inspects. Cache by the raw COM pointer:
- // the game keeps these shader objects alive for its own lifetime, so the
- // pointer is a stable key for as long as it is ever passed back to us.
- static std::unordered_map<void*,uint64_t> cache;
- auto it=cache.find(static_cast<void*>(shader));if(it!=cache.end())return it->second;
- UINT size=0;if(FAILED(shader->GetFunction(nullptr,&size))||!size||size>65536){cache.emplace(static_cast<void*>(shader),0);return 0;}
- std::vector<BYTE> bytes(size);if(FAILED(shader->GetFunction(bytes.data(),&size))){cache.emplace(static_cast<void*>(shader),0);return 0;}
- uint64_t h=14695981039346656037ull;for(BYTE b:bytes){h^=b;h*=1099511628211ull;}
- cache.emplace(static_cast<void*>(shader),h);return h;
+ if constexpr (std::is_same_v<T, IDirect3DVertexShader9>)
+  return renderer::ShaderCache::Instance().GetShaderHash(shader);
+ else if constexpr (std::is_same_v<T, IDirect3DPixelShader9>)
+  return renderer::ShaderCache::Instance().GetShaderHash(shader);
+ else
+  return 0;
 }
 uint32_t NoiseHash(int x,int y){uint32_t h=uint32_t(x)*374761393u+uint32_t(y)*668265263u;h=(h^(h>>13))*1274126177u;return h^(h>>16);}
 float SmoothNoise(float x,float y,int cells){
@@ -154,72 +155,38 @@ bool EnsureNoise(IDirect3DDevice9* d){
  texture->UnlockRect(0);resources.noise=texture;resources.noiseOwner=d;return true;
 }
 bool CaptureCamera(IDirect3DDevice9* d){
- float v[27][4]{};D3DVIEWPORT9 vp{};
- if(FAILED(d->GetVertexShaderConstantF(0,v[0],27))||FAILED(d->GetViewport(&vp))||vp.MinZ!=0||vp.MaxZ<=0)return false;
- for(auto& row:v)for(float f:row)if(!std::isfinite(f))return false;
- // Only the captured standard perspective projection and rigid world-view.
- if(v[4][0]<=0||v[5][1]<=0||v[6][2]<=1||v[7][2]>=0||fabs(v[6][3]-1)>.001f||fabs(v[7][3])>.001f)return false;
- for(int i=0;i<3;++i)for(int j=0;j<3;++j){float dot=0;for(int k=0;k<3;++k)dot+=v[i][k]*v[j][k];if(fabs(dot-(i==j?1.f:0.f))>.002f)return false;}
- memset(constants,0,sizeof(constants));
- constants[0][0]=v[6][2];constants[0][1]=v[7][2];constants[0][2]=v[4][0];constants[0][3]=v[5][1];
- constants[1][0]=baseHeight;constants[1][1]=falloff;constants[1][2]=density;constants[1][3]=350;
-  float directLuminance=v[26][0]*.2126f+v[26][1]*.7152f+v[26][2]*.0722f;
-  // Moonlight in this client is distinctly blue. A brightness-only source
-  // test mistakes the white moon disc for the sun and projects rays toward the
-  // (hidden) solar direction when the camera pitches. Gate sky shafts by the
-  // actual directional-light colour; neutral/warm daylight remains accepted.
-  float daylightBrightness=std::clamp((directLuminance-.18f)*4.f,0.f,1.f);
-  float daylightTint=std::clamp((v[26][0]-v[26][2])*4.f+.35f,0.f,1.f);
-  float daylight=daylightBrightness*daylightTint;celestialDaylight=daylight;
-  float moonBrightness=std::clamp((directLuminance-.12f)*4.f,0.f,1.f);
-  float moonTint=std::clamp((v[26][2]-v[26][0])*6.f,0.f,1.f);
-  float moonlight=moonBrightness*moonTint*(1-daylight);celestialMoonlight=moonlight;
-  // Zone palettes can be strongly blue even in broad daylight. Shadows depend
-  // on directional-light energy, not on that colour-temperature heuristic.
-  celestialShadowLight=std::clamp((directLuminance-.08f)*3.8f,.18f,1.f);
-  constants[2][0]=-1;constants[2][1]=-1;constants[2][2]=0;constants[2][3]=vp.MaxZ;
-  float lightLen=std::sqrt(v[24][0]*v[24][0]+v[24][1]*v[24][1]+v[24][2]*v[24][2]);
-  if(lightLen>1e-4f){
-   // In WoW, v[24] represents directional light propagation in view space.
-   // The vector pointing TOWARDS the celestial sun/moon in view space is:
-   // +X (right), +Y (up towards sky), +Z (forward in front of camera).
-   float lx = -v[24][0] / lightLen;
-   float ly = -v[24][1] / lightLen;
-   float lz =  v[24][2] / lightLen;
-   constants[10][0]=lx; constants[10][1]=ly; constants[10][2]=lz; constants[10][3]=0;
-   // In view space, +Z is in front of the camera. The celestial body is in front when lz > 0.02.
-   if(lz > 0.02f){
-    float projX = (lx * v[4][0]) / lz;
-    float projY = (ly * v[5][1]) / lz;
-    float targetX = 0.5f + 0.5f * projX + sunOffsetX;
-    float targetY = 0.5f - 0.5f * projY * sunVerticalScale + sunOffsetY;
-    constants[2][0] = targetX;
-    constants[2][1] = targetY;
-    smoothSunX = targetX;
-    smoothSunY = targetY;
-    float facing = std::clamp((lz + 0.05f) * 2.5f, 0.0f, 1.0f);
-    if(targetX < -0.50f || targetX > 1.50f || targetY < -0.50f || targetY > 1.50f) facing = 0.0f;
-    constants[2][2] = strength * (daylight + moonStrength * moonlight) * facing;
-   }else{
-    smoothSunX = smoothSunY = -1;
-   }
-  }else{
-   smoothSunX = smoothSunY = -1;
-   constants[10][0] = 0; constants[10][1] = 0; constants[10][2] = 1; constants[10][3] = 0;
+ renderer::CameraCaptureConfig cfg;
+ cfg.sunOffsetX = sunOffsetX;
+ cfg.sunOffsetY = sunOffsetY;
+ cfg.sunVerticalScale = sunVerticalScale;
+ cfg.strength = strength;
+ cfg.moonStrength = moonStrength;
+ cfg.baseHeight = baseHeight;
+ cfg.falloff = falloff;
+ cfg.density = density;
+ cfg.fogWash = fogWash;
+ cfg.shaftDebug = shaftDebug;
+ cfg.variation = variation;
+ cfg.lowLayer = lowLayer;
+ cfg.raySoftness = raySoftness;
+ cfg.rayFalloff = rayFalloff;
+
+ renderer::FrameContext frameCtx;
+ bool ok = renderer::CameraCapture::Instance().Capture(
+     d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
+ if(ok){
+  celestialDaylight = frameCtx.daylightFactor;
+  celestialMoonlight = frameCtx.moonlightFactor;
+  celestialShadowLight = frameCtx.shadowLightFactor;
+  smoothSunX = frameCtx.sunScreenX;
+  smoothSunY = frameCtx.sunScreenY;
+  static unsigned logged=0;if(logged++<32||frames%180==0){
+   char hashHex[24];sprintf_s(hashHex,"0x%016llX",static_cast<unsigned long long>(cameraCaptureShaderHash));
+   std::ofstream out(std::filesystem::path(logPath),std::ios::app);
+   out<<"viewSun="<<constants[10][0]<<','<<constants[10][1]<<','<<constants[10][2]<<" daylight="<<celestialDaylight<<" moonlight="<<celestialMoonlight<<" sourceUV="<<constants[2][0]<<','<<constants[2][1]<<" strength="<<constants[2][2]<<" capturedBy="<<hashHex<<'\n';
   }
- for(int i=0;i<3;++i){
-  float horizon=v[25][i]*1.5f+v[26][i]*0.30f;
-  constants[3][i]=std::clamp(horizon,0.12f,0.95f);
  }
- for(int i=0;i<3;++i)for(int j=0;j<3;++j)constants[4+i][j]=v[j][i];
- for(int i=0;i<3;++i)for(int j=0;j<3;++j)constants[7][i]-=v[3][j]*v[i][j];
- constants[7][3]=1;constants[8][0]=3;constants[8][1]=fogWash;constants[8][2]=shaftDebug?1.f:0.f;
- capturedViewTranslation[0]=v[3][0];capturedViewTranslation[1]=v[3][1];capturedViewTranslation[2]=v[3][2];capturedViewValid=true;
- constants[9][0]=float(GetTickCount64()%1200000)*.001f;constants[9][1]=.018f;constants[9][2]=variation;constants[9][3]=lowLayer;
-  for(int i=0;i<3;++i) constants[11][i]=v[26][i];
- constants[12][0]=1.f/vp.Width;constants[12][1]=1.f/vp.Height;constants[12][2]=raySoftness;constants[12][3]=rayFalloff;
-  static unsigned logged=0;if(logged++<32||frames%180==0){char hashHex[24];sprintf_s(hashHex,"0x%016llX",static_cast<unsigned long long>(cameraCaptureShaderHash));std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"light="<<v[24][0]<<','<<v[24][1]<<','<<v[24][2]<<" viewSun="<<constants[10][0]<<','<<constants[10][1]<<','<<constants[10][2]<<" direct="<<v[26][0]<<','<<v[26][1]<<','<<v[26][2]<<" daylight="<<daylight<<" moonlight="<<moonlight<<" sourceUV="<<constants[2][0]<<','<<constants[2][1]<<" strength="<<constants[2][2]<<" capturedBy="<<hashHex<<'\n';}
- return true;
+ return ok;
 }
 struct Vec3{float x,y,z;};
 Vec3 Add(Vec3 a,Vec3 b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
