@@ -80,6 +80,25 @@ namespace renderer
         if (FAILED(device->GetTexture(0, texture.GetAddressOf())) || !texture)
             return;
 
+        // Texture size is the most reliable discriminator found: across
+        // every in-game capture, the real sun disc is always ~256x256 and
+        // the real moon disc is always ~128x128 - while a consistently
+        // present, unrelated companion draw (some other sprite, not the
+        // disc itself) is always ~64x64 and otherwise matches every other
+        // gate here, including at times a WORLD/VIEW shape close enough to
+        // be mistaken for the real thing. z-range alone was not reliable
+        // (it drifts with viewing angle and can approach the impostor's
+        // range near screen edges); size does not drift.
+        UINT texW = 0;
+        if (texture->GetType() == D3DRTYPE_TEXTURE)
+        {
+            D3DSURFACE_DESC desc{};
+            if (SUCCEEDED(static_cast<IDirect3DTexture9*>(texture.Get())->GetLevelDesc(0, &desc)))
+                texW = desc.Width;
+        }
+        if (texW == 0)
+            return;
+
         D3DMATRIX world{}, view{}, proj{};
         if (FAILED(device->GetTransform(D3DTS_WORLD, &world))) return;
         if (FAILED(device->GetTransform(D3DTS_VIEW, &view))) return;
@@ -107,21 +126,18 @@ namespace renderer
         if (cz <= 0.05f)
             return;
 
-        if (viewTranslationZero && worldIsLargeScale)
+        if (viewTranslationZero && worldIsLargeScale && texW >= 200)
         {
             UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex);
         }
-        else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 9.0f && viewTransZ < 15.0f)
+        else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 4.0f && viewTransZ < 16.0f
+            && texW >= 96 && texW <= 160)
         {
-            // Tight on purpose: four independent in-game captures of the
-            // real moon all landed z in [11.4, 12.0]. An earlier, much
-            // wider range (1,40) let through an unrelated draw at z=1.42
-            // (tx=-11.3, ty=3.74 - a completely different position) that
-            // also happened to match every other gate, and since this
-            // function keeps the LAST match seen each frame, that impostor
-            // silently overwrote the real moon on frames where both were
-            // observed. [9,15] comfortably encloses the real signal with
-            // margin while excluding that impostor by a wide margin.
+            // z-range is a loose sanity check now, not the discriminator -
+            // near screen edges the real moon's z was observed to drop as
+            // low as 8.93 (from ~12 near center), so a tight range isn't
+            // safe on its own. The texW filter (96-160, i.e. ~128 and
+            // explicitly excluding the ~64 impostor) does the real work.
             UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex);
         }
     }
