@@ -27,14 +27,18 @@ namespace renderer
         float extinction = 0.8f;
         float anisotropyG = 0.72f;
         float maxDistance = 220.0f;
-        uint32_t sampleCount = 16;
-        float resolutionPercent = 50.0f; // 50% = half-res, 25% = quarter-res
+        uint32_t sampleCount = 8;            // Default 8 samples
+        uint32_t skySampleCount = 6;         // Default 6 samples for sky
+        float resolutionPercent = 25.0f;     // Default 25% = quarter-res
         bool temporalEnabled = true;
-        float temporalBlend = 0.78f;
+        float temporalBlend = 0.80f;
         bool shadowEnabled = true;
+        bool shadowPCF = false;              // Default false = fast 1-tap shadow fetch
+        uint32_t shadowStride = 2;           // Interleaved shadow lookup: fetch every 2 steps
         float shadowBias = 0.0015f;
         bool jitterEnabled = true;
         float moonStrength = 0.25f;
+        bool edgeAwareBilateral = true;
         VolumetricDebugMode debugMode = VolumetricDebugMode::None;
 
         // Height density tuning
@@ -51,13 +55,12 @@ namespace renderer
         void Configure(const std::wstring& basePath);
         void Reset(IDirect3DDevice9* device);
 
-        // Executes the raymarch, temporal, upsample, and composite passes
+        // Executes the raymarch, temporal, and merged upsample-composite passes
         bool Render(IDirect3DDevice9* device, const FrameContext& frameContext, IDirect3DSurface9* targetSurface);
 
         VolumetricSettings& Settings() { return m_settings; }
         const VolumetricSettings& Settings() const { return m_settings; }
 
-        IDirect3DTexture9* GetUpsampledTexture() const { return m_upsampleTexture.Get(); }
         IDirect3DTexture9* GetRaymarchTexture() const { return m_raymarchTexture.Get(); }
 
     private:
@@ -75,7 +78,7 @@ namespace renderer
         uint32_t m_lowWidth = 0;
         uint32_t m_lowHeight = 0;
 
-        // Render targets
+        // Low-res render targets
         ComPtr<IDirect3DTexture9> m_raymarchTexture;
         ComPtr<IDirect3DSurface9> m_raymarchSurface;
 
@@ -88,15 +91,10 @@ namespace renderer
         uint32_t m_historyReadIndex = 0;
         bool m_historyValid = false;
 
-        // Depth-aware upsampled texture
-        ComPtr<IDirect3DTexture9> m_upsampleTexture;
-        ComPtr<IDirect3DSurface9> m_upsampleSurface;
-
-        // Shaders
+        // Persistent Shaders
+        ComPtr<IDirect3DPixelShader9> m_downsampleDepthShader;
         ComPtr<IDirect3DPixelShader9> m_raymarchShader;
         ComPtr<IDirect3DPixelShader9> m_temporalShader;
-        ComPtr<IDirect3DPixelShader9> m_upsampleShader;
-        ComPtr<IDirect3DPixelShader9> m_compositeShader;
-        ComPtr<IDirect3DPixelShader9> m_downsampleDepthShader;
+        ComPtr<IDirect3DPixelShader9> m_upsampleCompositeShader;
     };
 }

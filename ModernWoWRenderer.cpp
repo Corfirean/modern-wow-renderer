@@ -204,50 +204,66 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
 }
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
     if(volume::internal)return originalDraw(d,t,start,n);
-    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
+    renderer::DrawClassification dc{};
+    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDraw(d,t,start,n);});
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitive",t,n);
-    waterhighlight::Scope tint(d,g_drawingOverlay);
-    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
+    {
+        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
+        if(!g_drawingOverlay)waterreflection::Prepare(d);
+        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitive",t,n);
+        waterhighlight::Scope tint(d,g_drawingOverlay);
+        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    }
     return originalDraw(d,t,start,n);
 }
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
-    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
+    renderer::DrawClassification dc{};
+    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
-    waterhighlight::Scope tint(d,g_drawingOverlay);
-    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+    {
+        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
+        if(!g_drawingOverlay)waterreflection::Prepare(d);
+        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
+        waterhighlight::Scope tint(d,g_drawingOverlay);
+        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    }
     return originalDrawIndexed(d,t,base,min,vertices,start,n);
 }
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
     if(volume::internal)return originalDrawUP(d,t,n,v,stride);
-    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
+    renderer::DrawClassification dc{};
+    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawUP(d,t,n,v,stride);});
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
-    waterhighlight::Scope tint(d,g_drawingOverlay);
-    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
+    {
+        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
+        if(!g_drawingOverlay)waterreflection::Prepare(d);
+        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
+        waterhighlight::Scope tint(d,g_drawingOverlay);
+        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    }
     return originalDrawUP(d,t,n,v,stride);
 }
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
     if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
-    if(!g_drawingOverlay)ClassifyCurrentDraw(d,t,n);
+    renderer::DrawClassification dc{};
+    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
-    if(!g_drawingOverlay)waterreflection::Prepare(d);
-    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
-    waterhighlight::Scope tint(d,g_drawingOverlay);
-    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
+    {
+        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
+        if(!g_drawingOverlay)waterreflection::Prepare(d);
+        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
+        waterhighlight::Scope tint(d,g_drawingOverlay);
+        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    }
     return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
 }
 

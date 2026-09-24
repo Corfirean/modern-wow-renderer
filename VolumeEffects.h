@@ -179,12 +179,12 @@ sampler2D sourceMask:register(s0);
 // xy=sun position, z=total ray reach, w=per-sample decay
 float4 radial:register(c0);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float2 stepUv=(radial.xy-uv)*(radial.z/32.0);
+    float2 stepUv=(radial.xy-uv)*(radial.z/16.0);
     float illumination=1;
     float weightSum=0;
     float4 light=0;
     float2 q=uv;
-    [unroll] for(int i=0;i<32;++i) {
+    [unroll] for(int i=0;i<16;++i) {
         q+=stepUv;
         float weight=illumination;
         light+=tex2D(sourceMask,q)*weight;

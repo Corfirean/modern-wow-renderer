@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include "../D3D9/ScopedRenderState.h"
+#include "../Diagnostics/PerformanceProfiler.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -31,8 +33,9 @@ float4 invView2 : register(c6);        // inverse view rotation row 2
 float4 tuning0 : register(c7);         // x=maxDistance, y=sampleCount, z=density, w=extinction
 float4 tuning1 : register(c8);         // x=shadowBias, y=shadowMapSize, z=shadowEnabled, w=debugMode
 float4x4 shadowMatrix : register(c9);  // c9..c12: world to shadow matrix
-float4 jitterParams : register(c13);   // x=frameIndex, y=resolutionDivisor, z=jitterEnabled, w=time
+float4 jitterParams : register(c13);   // x=frameIndex, y=resolutionDivisor, z=jitterEnabled, w=shadowStride
 float4 heightDensity : register(c14);  // x=baseHeight, y=falloff, z=lowLayer, w=maxZ
+float4 extraParams : register(c15);    // x=shadowPCF, y=skySampleCount, z=skyMaxDistance, w=unused
 
 float PhaseHG(float cosTheta, float g)
 {
@@ -47,7 +50,7 @@ float InterleavedGradientNoise(float2 pixelPos, float frame)
     return frac(magic.z * frac(dot(pixelPos, magic.xy)));
 }
 
-float SampleShadow(float3 worldPos, float bias, float shadowSize)
+float SampleShadow(float3 worldPos, float bias, float shadowSize, float usePCF, float frame)
 {
     float4 sc = mul(float4(worldPos, 1.0), shadowMatrix);
     float u = 0.5 * sc.x + 0.5 + 0.5 / shadowSize;
@@ -59,18 +62,32 @@ float SampleShadow(float3 worldPos, float bias, float shadowSize)
         return 1.0;
     }
 
-    float2 texelSize = float2(1.0 / shadowSize, 1.0 / shadowSize);
-    float2 uvBase = float2(u, v);
-    
-    float4 d;
-    d.x = tex2D(shadowMap, uvBase).r;
-    d.y = tex2D(shadowMap, uvBase + float2(texelSize.x, 0.0)).r;
-    d.z = tex2D(shadowMap, uvBase + float2(0.0, texelSize.y)).r;
-    d.w = tex2D(shadowMap, uvBase + texelSize).r;
+    if (usePCF > 0.5)
+    {
+        float2 texelSize = float2(1.0 / shadowSize, 1.0 / shadowSize);
+        float2 uvBase = float2(u, v);
+        float4 d;
+        d.x = tex2D(shadowMap, uvBase).r;
+        d.y = tex2D(shadowMap, uvBase + float2(texelSize.x, 0.0)).r;
+        d.z = tex2D(shadowMap, uvBase + float2(0.0, texelSize.y)).r;
+        d.w = tex2D(shadowMap, uvBase + texelSize).r;
 
-    float4 inLight = (z - bias <= d) ? 1.0 : 0.0;
-    float2 f = frac(uvBase * shadowSize);
-    return lerp(lerp(inLight.x, inLight.y, f.x), lerp(inLight.z, inLight.w, f.x), f.y);
+        float4 inLight = (z - bias <= d) ? 1.0 : 0.0;
+        float2 f = frac(uvBase * shadowSize);
+        return lerp(lerp(inLight.x, inLight.y, f.x), lerp(inLight.z, inLight.w, f.x), f.y);
+    }
+    else
+    {
+        // Temporal pseudo-PCF jitter offset based on frame index
+        float fmod4 = frac(frame * 0.25) * 4.0;
+        float2 offset = float2(0.0, 0.0);
+        if (fmod4 >= 2.5) offset = float2(0.5 / shadowSize, 0.5 / shadowSize);
+        else if (fmod4 >= 1.5) offset = float2(0.0, 0.5 / shadowSize);
+        else if (fmod4 >= 0.5) offset = float2(0.5 / shadowSize, 0.0);
+
+        float d = tex2D(shadowMap, float2(u, v) + offset).r;
+        return (z - bias <= d) ? 1.0 : 0.0;
+    }
 }
 
 float4 main(float2 uv : TEXCOORD0, float2 vpos : VPOS) : COLOR0
@@ -86,7 +103,8 @@ float4 main(float2 uv : TEXCOORD0, float2 vpos : VPOS) : COLOR0
     int debugMode = int(tuning1.w);
 
     float rawDepth = tex2D(depthMap, uv).r;
-    float linearZ = (rawDepth >= 0.9999) ? heightDensity.w : (projUnpack.y / (rawDepth - projUnpack.x));
+    bool isSky = (rawDepth >= 0.9999);
+    float linearZ = isSky ? heightDensity.w : (projUnpack.y / (rawDepth - projUnpack.x));
     linearZ = clamp(linearZ, 0.0, heightDensity.w);
 
     float3 viewDir = float3((uv.x * 2.0 - 1.0) / projUnpack.z, (1.0 - uv.y * 2.0) / projUnpack.w, 1.0);
@@ -96,11 +114,12 @@ float4 main(float2 uv : TEXCOORD0, float2 vpos : VPOS) : COLOR0
     worldRay = normalize(worldRay);
 
     float sceneDist = linearZ * viewDist;
-    float marchEnd = min(sceneDist, maxDist);
-    if (marchEnd <= 0.01)
+    float maxMarch = isSky ? min(sceneDist, extraParams.z) : min(sceneDist, maxDist);
+    if (maxMarch <= 0.01)
         return float4(0, 0, 0, 0);
 
-    float stepLength = marchEnd / float(samples);
+    int actualSamples = isSky ? int(extraParams.y) : samples;
+    float stepLength = maxMarch / float(actualSamples);
 
     float jitter = 0.5;
     if (jitterParams.z > 0.5)
@@ -116,29 +135,56 @@ float4 main(float2 uv : TEXCOORD0, float2 vpos : VPOS) : COLOR0
     float avgShadow = 0.0;
     float avgDensity = 0.0;
 
-    for (int i = 0; i < samples; ++i)
+    int shadowStride = max(1, int(jitterParams.w));
+    float cachedVis = 1.0;
+
+    for (int i = 0; i < actualSamples; ++i)
     {
         float t = (float(i) + jitter) * stepLength;
         float3 samplePos = cameraPos.xyz + worldRay * t;
 
         float h = samplePos.z - heightDensity.x;
-        float localDensity = exp(-clamp(h * heightDensity.y, -8.0, 8.0)) * densityScale;
+        // Fast exp2: 1.442695 = log2(e)
+        float expVal = clamp(h * heightDensity.y * 1.442695, -11.5, 11.5);
+        float localDensity = exp2(-expVal) * densityScale;
         avgDensity += localDensity;
 
-        float vis = 1.0;
+        // Skip negligible density samples to save shadow fetches & math
+        if (localDensity < 0.0001)
+        {
+            continue;
+        }
+
+        // Interleaved shadow sampling: sample every shadowStride steps, reuse otherwise
         if (shadowOn)
         {
-            vis = SampleShadow(samplePos, bias, shadowSize);
+            if ((i % shadowStride) == 0)
+            {
+                cachedVis = SampleShadow(samplePos, bias, shadowSize, extraParams.x, jitterParams.x);
+            }
         }
-        avgShadow += vis;
+        else
+        {
+            cachedVis = 1.0;
+        }
+        avgShadow += cachedVis;
 
-        float scattering = localDensity * vis * phase;
+        float scattering = localDensity * cachedVis * phase;
         accumRadiance += transmittance * scattering * sunColor.rgb * stepLength;
-        transmittance *= exp(-localDensity * extinction * stepLength);
+
+        // Fast transmittance via exp2
+        float extVal = clamp(localDensity * extinction * stepLength * 1.442695, 0.0, 11.5);
+        transmittance *= exp2(-extVal);
+
+        // Early termination when transmittance is saturated
+        if (transmittance < 0.02)
+        {
+            break;
+        }
     }
 
-    avgShadow /= float(samples);
-    avgDensity /= float(samples);
+    avgShadow /= float(actualSamples);
+    avgDensity /= float(actualSamples);
 
     if (debugMode == 2)
     {
@@ -177,19 +223,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     }
 
     float2 ts = texelSize.xy;
-    float4 minVal = cur;
-    float4 maxVal = cur;
+    // 5-tap cross clamp (center, left, right, up, down)
+    float4 cL = tex2D(currentMap, uv - float2(ts.x, 0.0));
+    float4 cR = tex2D(currentMap, uv + float2(ts.x, 0.0));
+    float4 cU = tex2D(currentMap, uv - float2(0.0, ts.y));
+    float4 cD = tex2D(currentMap, uv + float2(0.0, ts.y));
 
-    for (int y = -1; y <= 1; ++y)
-    {
-        for (int x = -1; x <= 1; ++x)
-        {
-            if (x == 0 && y == 0) continue;
-            float4 s = tex2D(currentMap, uv + float2(x, y) * ts);
-            minVal = min(minVal, s);
-            maxVal = max(maxVal, s);
-        }
-    }
+    float4 minVal = min(cur, min(min(cL, cR), min(cU, cD)));
+    float4 maxVal = max(cur, max(max(cL, cR), max(cU, cD)));
 
     float expand = temporalTuning.y;
     minVal = max(minVal - expand, float4(0, 0, 0, 0));
@@ -203,13 +244,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 }
 )";
 
-        const char* const g_upsampleSource = R"(
-sampler2D lowResVolumetric : register(s0);
-sampler2D fullResDepthMap : register(s1);
-sampler2D lowResDepthMap : register(s2);
+        const char* const g_upsampleCompositeSource = R"(
+sampler2D sceneMap : register(s0);
+sampler2D lowResVolumetric : register(s1);
+sampler2D fullResDepthMap : register(s2);
+sampler2D lowResDepthMap : register(s3);
 
 float4 texelSizes : register(c0);
 float4 projUnpack : register(c1);
+float4 compositeTuning : register(c2);
 
 float Linearize(float raw, float P22, float P32, float maxZ)
 {
@@ -218,51 +261,70 @@ float Linearize(float raw, float P22, float P32, float maxZ)
 
 float4 main(float2 uv : TEXCOORD0) : COLOR0
 {
-    float rawFull = tex2D(fullResDepthMap, uv).r;
-    float fullZ = Linearize(rawFull, projUnpack.x, projUnpack.y, projUnpack.z);
-
+    int debugMode = int(compositeTuning.x);
     float2 lowTexel = texelSizes.zw;
-    float2 offsets[4] = {
-        float2(-0.5, -0.5),
-        float2( 0.5, -0.5),
-        float2(-0.5,  0.5),
-        float2( 0.5,  0.5)
-    };
 
-    float totalWeight = 0.0001;
-    float4 accumColor = float4(0, 0, 0, 0);
+    float4 vol = float4(0, 0, 0, 0);
 
-    for (int i = 0; i < 4; ++i)
+    if (projUnpack.w < 0.5)
     {
-        float2 sampleUV = uv + offsets[i] * lowTexel;
-        float rawLow = tex2D(lowResDepthMap, sampleUV).r;
-        float lowZ = Linearize(rawLow, projUnpack.x, projUnpack.y, projUnpack.z);
+        // Direct fast bilinear sample
+        vol = tex2D(lowResVolumetric, uv);
+    }
+    else
+    {
+        // 2x2 low-depth footprint
+        float2 offsets[4] = {
+            float2(-0.5, -0.5),
+            float2( 0.5, -0.5),
+            float2(-0.5,  0.5),
+            float2( 0.5,  0.5)
+        };
 
-        float depthDiff = abs(fullZ - lowZ);
-        float weight = 1.0 / (depthDiff * 0.5 + 0.01);
+        float rawLow0 = tex2D(lowResDepthMap, uv + offsets[0] * lowTexel).r;
+        float rawLow1 = tex2D(lowResDepthMap, uv + offsets[1] * lowTexel).r;
+        float rawLow2 = tex2D(lowResDepthMap, uv + offsets[2] * lowTexel).r;
+        float rawLow3 = tex2D(lowResDepthMap, uv + offsets[3] * lowTexel).r;
 
-        float4 val = tex2D(lowResVolumetric, sampleUV);
-        accumColor += val * weight;
-        totalWeight += weight;
+        float lowZ0 = Linearize(rawLow0, projUnpack.x, projUnpack.y, projUnpack.z);
+        float lowZ1 = Linearize(rawLow1, projUnpack.x, projUnpack.y, projUnpack.z);
+        float lowZ2 = Linearize(rawLow2, projUnpack.x, projUnpack.y, projUnpack.z);
+        float lowZ3 = Linearize(rawLow3, projUnpack.x, projUnpack.y, projUnpack.z);
+
+        float minLowZ = min(min(lowZ0, lowZ1), min(lowZ2, lowZ3));
+        float maxLowZ = max(max(lowZ0, lowZ1), max(lowZ2, lowZ3));
+
+        // If depth variance in the 2x2 neighborhood is small, geometry is flat: do fast bilinear fetch
+        if ((maxLowZ - minLowZ) < 1.5)
+        {
+            vol = tex2D(lowResVolumetric, uv);
+        }
+        else
+        {
+            // Near silhouette discontinuity: nearest-depth low-res sample
+            float rawFull = tex2D(fullResDepthMap, uv).r;
+            float fullZ = Linearize(rawFull, projUnpack.x, projUnpack.y, projUnpack.z);
+
+            float d0 = abs(fullZ - lowZ0);
+            float d1 = abs(fullZ - lowZ1);
+            float d2 = abs(fullZ - lowZ2);
+            float d3 = abs(fullZ - lowZ3);
+
+            float2 bestOffset = offsets[0];
+            float bestD = d0;
+            if (d1 < bestD) { bestD = d1; bestOffset = offsets[1]; }
+            if (d2 < bestD) { bestD = d2; bestOffset = offsets[2]; }
+            if (d3 < bestD) { bestD = d3; bestOffset = offsets[3]; }
+
+            vol = tex2D(lowResVolumetric, uv + bestOffset * lowTexel);
+        }
     }
 
-    return accumColor / totalWeight;
-}
-)";
-
-        const char* const g_compositeSource = R"(
-sampler2D sceneMap : register(s0);
-sampler2D volumetricMap : register(s1);
-
-float4 compositeTuning : register(c0);
-
-float4 main(float2 uv : TEXCOORD0) : COLOR0
-{
-    float4 vol = tex2D(volumetricMap, uv);
-    if (compositeTuning.y > 0.5)
+    if (debugMode > 0)
     {
         return float4(vol.rgb, 1.0);
     }
+
     float3 scene = tex2D(sceneMap, uv).rgb;
     float3 result = scene * (1.0 - vol.a) + vol.rgb;
     return float4(result, 1.0);
@@ -297,18 +359,25 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         int maxDist = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricMaxDistance", 220, iniPath.c_str());
         m_settings.maxDistance = static_cast<float>(maxDist);
 
-        int sampleCount = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricSampleCount", 16, iniPath.c_str());
-        m_settings.sampleCount = static_cast<uint32_t>(std::clamp(sampleCount, 4, 64));
+        int sampleCount = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricSampleCount", 8, iniPath.c_str());
+        m_settings.sampleCount = static_cast<uint32_t>(std::clamp(sampleCount, 4, 32));
 
-        int resPercent = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricResolutionPercent", 50, iniPath.c_str());
-        m_settings.resolutionPercent = static_cast<float>(std::clamp(resPercent, 25, 100));
+        int skySamples = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricSkySampleCount", 6, iniPath.c_str());
+        m_settings.skySampleCount = static_cast<uint32_t>(std::clamp(skySamples, 2, 16));
+
+        int resPercent = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricResolutionPercent", 25, iniPath.c_str());
+        m_settings.resolutionPercent = static_cast<float>(std::clamp(resPercent, 20, 100));
 
         m_settings.temporalEnabled = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricTemporalEnabled", 1, iniPath.c_str()) != 0;
 
-        int temporalBlend = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricTemporalPercent", 78, iniPath.c_str());
+        int temporalBlend = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricTemporalPercent", 80, iniPath.c_str());
         m_settings.temporalBlend = static_cast<float>(temporalBlend) / 100.0f;
 
         m_settings.shadowEnabled = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowEnabled", 1, iniPath.c_str()) != 0;
+        m_settings.shadowPCF = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowPCF", 0, iniPath.c_str()) != 0;
+
+        int stride = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowStride", 2, iniPath.c_str());
+        m_settings.shadowStride = static_cast<uint32_t>(std::clamp(stride, 1, 4));
 
         int shadowBias = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowBiasPermille", 15, iniPath.c_str());
         m_settings.shadowBias = static_cast<float>(shadowBias) / 10000.0f;
@@ -317,6 +386,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         int moonStrength = GetPrivateProfileIntW(L"Atmosphere", L"MoonVolumetricStrengthPercent", 25, iniPath.c_str());
         m_settings.moonStrength = static_cast<float>(moonStrength) / 100.0f;
+
+        m_settings.edgeAwareBilateral = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricUpsampleBilateral", 1, iniPath.c_str()) != 0;
 
         int debugMode = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricDebugMode", 0, iniPath.c_str());
         m_settings.debugMode = static_cast<VolumetricDebugMode>(debugMode);
@@ -333,7 +404,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
     {
-        if (m_owner == device)
+        if (m_owner == device || m_owner == nullptr)
         {
             m_raymarchSurface.Reset();
             m_raymarchTexture.Reset();
@@ -343,14 +414,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             m_historyTexture[0].Reset();
             m_historySurface[1].Reset();
             m_historyTexture[1].Reset();
-            m_upsampleSurface.Reset();
-            m_upsampleTexture.Reset();
 
+            m_downsampleDepthShader.Reset();
             m_raymarchShader.Reset();
             m_temporalShader.Reset();
-            m_upsampleShader.Reset();
-            m_compositeShader.Reset();
-            m_downsampleDepthShader.Reset();
+            m_upsampleCompositeShader.Reset();
 
             m_owner = nullptr;
             m_fullWidth = 0;
@@ -363,7 +431,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
     bool DirectionalVolumetricLighting::EnsureShaders(IDirect3DDevice9* device)
     {
-        if (m_raymarchShader && m_temporalShader && m_upsampleShader && m_compositeShader && m_downsampleDepthShader)
+        if (m_raymarchShader && m_temporalShader && m_upsampleCompositeShader && m_downsampleDepthShader)
             return true;
 
         auto compile = [device](const char* src, IDirect3DPixelShader9** outShader) -> bool {
@@ -379,8 +447,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (!compile(g_downsampleDepthSource, m_downsampleDepthShader.GetAddressOf())) return false;
         if (!compile(g_raymarchSource, m_raymarchShader.GetAddressOf())) return false;
         if (!compile(g_temporalSource, m_temporalShader.GetAddressOf())) return false;
-        if (!compile(g_upsampleSource, m_upsampleShader.GetAddressOf())) return false;
-        if (!compile(g_compositeSource, m_compositeShader.GetAddressOf())) return false;
+        if (!compile(g_upsampleCompositeSource, m_upsampleCompositeShader.GetAddressOf())) return false;
 
         return true;
     }
@@ -393,7 +460,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
 
         if (m_owner == device && m_fullWidth == fullWidth && m_fullHeight == fullHeight &&
             m_lowWidth == lowW && m_lowHeight == lowH &&
-            m_raymarchTexture && m_upsampleTexture && m_historyTexture[0] && m_historyTexture[1])
+            m_raymarchTexture && m_lowDepthTexture && m_historyTexture[0] && m_historyTexture[1])
         {
             return true;
         }
@@ -406,7 +473,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         m_lowHeight = lowH;
 
         D3DFORMAT hdrFormat = D3DFMT_A16B16G16R16F;
-        // Verify format support, fallback to A8R8G8B8 if 16F not supported as RT
         IDirect3D9* d3d = nullptr;
         if (SUCCEEDED(device->GetDirect3D(&d3d)) && d3d)
         {
@@ -432,7 +498,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 m_lowDepthTexture.GetAddressOf(), nullptr)) ||
             FAILED(m_lowDepthTexture->GetSurfaceLevel(0, m_lowDepthSurface.GetAddressOf())))
         {
-            // Fallback to D3DFMT_A8R8G8B8 for depth copy if R32F is unsupported
             if (FAILED(device->CreateTexture(lowW, lowH, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
                     m_lowDepthTexture.GetAddressOf(), nullptr)) ||
                 FAILED(m_lowDepthTexture->GetSurfaceLevel(0, m_lowDepthSurface.GetAddressOf())))
@@ -447,12 +512,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 FAILED(m_historyTexture[i]->GetSurfaceLevel(0, m_historySurface[i].GetAddressOf())))
                 return false;
         }
-
-        // 4. Full-res upsampled target
-        if (FAILED(device->CreateTexture(fullWidth, fullHeight, 1, D3DUSAGE_RENDERTARGET, hdrFormat, D3DPOOL_DEFAULT,
-                m_upsampleTexture.GetAddressOf(), nullptr)) ||
-            FAILED(m_upsampleTexture->GetSurfaceLevel(0, m_upsampleSurface.GetAddressOf())))
-            return false;
 
         m_historyValid = false;
         return true;
@@ -481,7 +540,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (!m_settings.enabled || !device || !targetSurface || !frameContext.cameraValid || !frameContext.depthAvailable)
             return false;
 
-        // Skip if light intensity is negligible
         float lightIntensity = frameContext.daylightFactor + m_settings.moonStrength * frameContext.moonlightFactor;
         if (lightIntensity < 0.01f && m_settings.debugMode == VolumetricDebugMode::None)
             return false;
@@ -496,12 +554,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         if (!EnsureResources(device, targetDesc.Width, targetDesc.Height))
             return false;
 
-        ComPtr<IDirect3DStateBlock9> stateBlock;
-        if (FAILED(device->CreateStateBlock(D3DSBT_ALL, stateBlock.GetAddressOf())) ||
-            FAILED(stateBlock->Capture()))
-            return false;
+        // Specialized lightweight scoped render state (NO D3DSBT_ALL)
+        ScopedRenderState scopedState(device);
 
-        // Disable Z and blending during internal passes
         for (D3DRENDERSTATETYPE s : {
             D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_STENCILENABLE,
             D3DRS_SCISSORTESTENABLE, D3DRS_FOGENABLE, D3DRS_LIGHTING, D3DRS_SRGBWRITEENABLE,
@@ -533,12 +588,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         // Pass 1: Low-Resolution Raymarch
         // -------------------------------------------------------------
         {
+            ScopedCpuTimer rayTimer(PerfStage::DirectionalVolumetricRaymarch);
+
             D3DVIEWPORT9 lowVp{ 0, 0, m_lowWidth, m_lowHeight, 0.0f, 1.0f };
             device->SetViewport(&lowVp);
             device->SetRenderTarget(0, m_raymarchSurface.Get());
             device->SetPixelShader(m_raymarchShader.Get());
 
-            // Bind depth map and shadow map
             device->SetTexture(0, frameContext.depthTexture);
             device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
             device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
@@ -551,16 +607,13 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             device->SetSamplerState(1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
             device->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
 
-            // c0: Camera Position
             float c0[4] = { frameContext.cameraPosition.x, frameContext.cameraPosition.y, frameContext.cameraPosition.z, 1.0f };
             device->SetPixelShaderConstantF(0, c0, 1);
 
-            // c1: Sun World Direction & Strength
             float totalStrength = m_settings.strength * lightIntensity;
             float c1[4] = { frameContext.sunDirectionWorld.x, frameContext.sunDirectionWorld.y, frameContext.sunDirectionWorld.z, totalStrength };
             device->SetPixelShaderConstantF(1, c1, 1);
 
-            // c2: Sun Color & Anisotropy G
             float c2[4] = {
                 frameContext.directionalLightColor.x,
                 frameContext.directionalLightColor.y,
@@ -569,10 +622,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             };
             device->SetPixelShaderConstantF(2, c2, 1);
 
-            // c3: ProjUnpack [P22, P32, P00, P11]
             device->SetPixelShaderConstantF(3, frameContext.projUnpack, 1);
 
-            // c4..c6: Inverse View Rotation
             float invV[3][4] = {
                 { frameContext.inverseView.m[0][0], frameContext.inverseView.m[0][1], frameContext.inverseView.m[0][2], 0.0f },
                 { frameContext.inverseView.m[1][0], frameContext.inverseView.m[1][1], frameContext.inverseView.m[1][2], 0.0f },
@@ -580,7 +631,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             };
             device->SetPixelShaderConstantF(4, invV[0], 3);
 
-            // c7: Tuning 0 [maxDist, sampleCount, density, extinction]
             float c7[4] = {
                 m_settings.maxDistance,
                 static_cast<float>(m_settings.sampleCount),
@@ -589,7 +639,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             };
             device->SetPixelShaderConstantF(7, c7, 1);
 
-            // c8: Tuning 1 [shadowBias, shadowMapSize, shadowEnabled, debugMode]
             float shadowOn = (m_settings.shadowEnabled && frameContext.shadowMapValid) ? 1.0f : 0.0f;
             float c8[4] = {
                 m_settings.shadowBias,
@@ -599,19 +648,16 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             };
             device->SetPixelShaderConstantF(8, c8, 1);
 
-            // c9..c12: World to Shadow Matrix
             device->SetPixelShaderConstantF(9, &frameContext.shadowMatrix.m[0][0], 4);
 
-            // c13: Jitter & Frame Params [frameIndex, resDivisor, jitterEnabled, time]
             float c13[4] = {
                 static_cast<float>(frameContext.frameIndex % 1024),
                 100.0f / m_settings.resolutionPercent,
                 m_settings.jitterEnabled ? 1.0f : 0.0f,
-                static_cast<float>(GetTickCount64() % 1200000) * 0.001f
+                static_cast<float>(m_settings.shadowStride)
             };
             device->SetPixelShaderConstantF(13, c13, 1);
 
-            // c14: Height Density [baseHeight, falloff, lowLayer, maxZ]
             float c14[4] = {
                 m_settings.baseHeight,
                 m_settings.heightFalloff,
@@ -620,6 +666,14 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             };
             device->SetPixelShaderConstantF(14, c14, 1);
 
+            float c15[4] = {
+                m_settings.shadowPCF ? 1.0f : 0.0f,
+                static_cast<float>(m_settings.skySampleCount),
+                std::min(m_settings.maxDistance, 120.0f),
+                0.0f
+            };
+            device->SetPixelShaderConstantF(15, c15, 1);
+
             DrawScreenQuad(device, m_lowWidth, m_lowHeight);
 
             device->SetTexture(0, nullptr);
@@ -627,13 +681,15 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
 
         // -------------------------------------------------------------
-        // Pass 2: Temporal Accumulation
+        // Pass 2: Temporal Accumulation (5-tap cross clamp)
         // -------------------------------------------------------------
         uint32_t writeHistoryIndex = 1 - m_historyReadIndex;
         IDirect3DTexture9* currentVolumetric = m_raymarchTexture.Get();
 
         if (m_settings.temporalEnabled && m_settings.debugMode == VolumetricDebugMode::None)
         {
+            ScopedCpuTimer tempTimer(PerfStage::VolumetricTemporal);
+
             D3DVIEWPORT9 lowVp{ 0, 0, m_lowWidth, m_lowHeight, 0.0f, 1.0f };
             device->SetViewport(&lowVp);
             device->SetRenderTarget(0, m_historySurface[writeHistoryIndex].Get());
@@ -650,7 +706,6 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
                 device->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
             }
 
-            // c0: [blendFactor, clampExpand, historyValid, 0]
             float c0[4] = {
                 m_settings.temporalBlend,
                 0.05f,
@@ -673,22 +728,25 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         }
 
         // -------------------------------------------------------------
-        // Pass 3: Depth-Aware Bilateral Upsample
+        // Pass 3: Merged Upsample + Composite directly onto targetSurface
         // -------------------------------------------------------------
         {
+            ScopedCpuTimer upTimer(PerfStage::VolumetricUpsample);
+
             D3DVIEWPORT9 fullVp{ 0, 0, m_fullWidth, m_fullHeight, 0.0f, 1.0f };
             device->SetViewport(&fullVp);
-            device->SetRenderTarget(0, m_upsampleSurface.Get());
-            device->SetPixelShader(m_upsampleShader.Get());
+            device->SetRenderTarget(0, targetSurface);
+            device->SetPixelShader(m_upsampleCompositeShader.Get());
 
-            device->SetTexture(0, currentVolumetric);
-            device->SetTexture(1, frameContext.depthTexture);
-            device->SetTexture(2, m_lowDepthTexture.Get());
+            device->SetTexture(0, frameContext.sceneColor);
+            device->SetTexture(1, currentVolumetric);
+            device->SetTexture(2, frameContext.depthTexture);
+            device->SetTexture(3, m_lowDepthTexture.Get());
 
-            for (DWORD s = 0; s < 3; ++s)
+            for (DWORD s = 0; s < 4; ++s)
             {
-                device->SetSamplerState(s, D3DSAMP_MINFILTER, s ? D3DTEXF_POINT : D3DTEXF_LINEAR);
-                device->SetSamplerState(s, D3DSAMP_MAGFILTER, s ? D3DTEXF_POINT : D3DTEXF_LINEAR);
+                device->SetSamplerState(s, D3DSAMP_MINFILTER, (s >= 2) ? D3DTEXF_POINT : D3DTEXF_LINEAR);
+                device->SetSamplerState(s, D3DSAMP_MAGFILTER, (s >= 2) ? D3DTEXF_POINT : D3DTEXF_LINEAR);
                 device->SetSamplerState(s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
                 device->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
             }
@@ -702,49 +760,28 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
             };
             device->SetPixelShaderConstantF(0, c0, 1);
 
-            // c1: projUnpack [P22, P32, maxZ, 0]
-            float c1[4] = { frameContext.projUnpack[0], frameContext.projUnpack[1], frameContext.depthMaxZ, 0.0f };
+            // c1: projUnpack [P22, P32, maxZ, edgeBilateralOn]
+            float c1[4] = {
+                frameContext.projUnpack[0],
+                frameContext.projUnpack[1],
+                frameContext.depthMaxZ,
+                m_settings.edgeAwareBilateral ? 1.0f : 0.0f
+            };
             device->SetPixelShaderConstantF(1, c1, 1);
+
+            // c2: composite tuning [debugMode, 0, 0, 0]
+            float isDebug = (m_settings.debugMode != VolumetricDebugMode::None) ? 1.0f : 0.0f;
+            float c2[4] = { isDebug, 0.0f, 0.0f, 0.0f };
+            device->SetPixelShaderConstantF(2, c2, 1);
 
             DrawScreenQuad(device, m_fullWidth, m_fullHeight);
 
             device->SetTexture(0, nullptr);
             device->SetTexture(1, nullptr);
             device->SetTexture(2, nullptr);
+            device->SetTexture(3, nullptr);
         }
 
-        // -------------------------------------------------------------
-        // Pass 4: Composite onto Scene Surface
-        // -------------------------------------------------------------
-        {
-            D3DVIEWPORT9 fullVp{ 0, 0, m_fullWidth, m_fullHeight, 0.0f, 1.0f };
-            device->SetViewport(&fullVp);
-            device->SetRenderTarget(0, targetSurface);
-            device->SetPixelShader(m_compositeShader.Get());
-
-            device->SetTexture(0, frameContext.sceneColor);
-            device->SetTexture(1, m_upsampleTexture.Get());
-
-            for (DWORD s = 0; s < 2; ++s)
-            {
-                device->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-                device->SetSamplerState(s, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-                device->SetSamplerState(s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
-                device->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
-            }
-
-            // c0: composite tuning [strength, debugMode, 0, 0]
-            float isDebug = (m_settings.debugMode != VolumetricDebugMode::None) ? 1.0f : 0.0f;
-            float c0[4] = { 1.0f, isDebug, 0.0f, 0.0f };
-            device->SetPixelShaderConstantF(0, c0, 1);
-
-            DrawScreenQuad(device, m_fullWidth, m_fullHeight);
-
-            device->SetTexture(0, nullptr);
-            device->SetTexture(1, nullptr);
-        }
-
-        stateBlock->Apply();
         return true;
     }
 }
