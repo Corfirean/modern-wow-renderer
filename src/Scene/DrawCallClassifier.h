@@ -35,7 +35,6 @@ namespace renderer
             uint64_t cameraCaptureShaderHash);
 
         std::unordered_map<PipelineKey, DrawClassification> m_cache;
-        mutable std::mutex m_mutex;
         uint64_t m_cacheHits = 0;
         uint64_t m_cacheMisses = 0;
     };

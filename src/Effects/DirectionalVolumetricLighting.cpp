@@ -373,7 +373,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         int temporalBlend = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricTemporalPercent", 80, iniPath.c_str());
         m_settings.temporalBlend = static_cast<float>(temporalBlend) / 100.0f;
 
-        m_settings.shadowEnabled = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowEnabled", 1, iniPath.c_str()) != 0;
+        m_settings.shadowEnabled = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowEnabled", 0, iniPath.c_str()) != 0;
         m_settings.shadowPCF = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowPCF", 0, iniPath.c_str()) != 0;
 
         int stride = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricShadowStride", 2, iniPath.c_str());

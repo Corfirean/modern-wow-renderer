@@ -201,19 +201,21 @@ namespace renderer
         };
 
         std::ostringstream ss;
-        ss << "\n[Perf] CPU timings (averaged over 300 frames):\n";
-        ss << std::fixed << std::setprecision(3);
-        ss << "  ShadowMap CPU setup           = " << getAvg(static_cast<size_t>(PerfStage::ShadowMapBuild)) << " ms\n";
-        ss << "  LegacyComposite CPU           = " << getAvg(static_cast<size_t>(PerfStage::LegacyComposite)) << " ms\n";
-        ss << "  ContactShadows CPU            = " << getAvg(static_cast<size_t>(PerfStage::ContactShadows)) << " ms\n";
-        ss << "  HeightFog CPU                 = " << getAvg(static_cast<size_t>(PerfStage::HeightFog)) << " ms\n";
-        ss << "  DirectionalVolumetricRaymarch = " << getAvg(static_cast<size_t>(PerfStage::DirectionalVolumetricRaymarch)) << " ms\n";
-        ss << "  VolumetricTemporal            = " << getAvg(static_cast<size_t>(PerfStage::VolumetricTemporal)) << " ms\n";
-        ss << "  VolumetricUpsample            = " << getAvg(static_cast<size_t>(PerfStage::VolumetricUpsample)) << " ms\n";
-        ss << "  SunRadialGlare                = " << getAvg(static_cast<size_t>(PerfStage::SunRadialGlare)) << " ms\n";
-        ss << "  PostProcess                   = " << getAvg(static_cast<size_t>(PerfStage::PostProcess)) << " ms\n";
-        ss << "  Water                         = " << getAvg(static_cast<size_t>(PerfStage::Water)) << " ms\n";
-        ss << "  TotalInjectedFrame CPU        = " << getAvg(static_cast<size_t>(PerfStage::TotalInjectedFrame)) << " ms\n";
+        if (m_cpuProfilingEnabled)
+        {
+            ss << "\n[Perf] CPU timings (averaged over 300 frames):\n";
+            ss << std::fixed << std::setprecision(3);
+            ss << "  ShadowMap CPU setup           = " << getAvg(static_cast<size_t>(PerfStage::ShadowMapBuild)) << " ms\n";
+            ss << "  LegacyComposite CPU           = " << getAvg(static_cast<size_t>(PerfStage::LegacyComposite)) << " ms\n";
+            ss << "  ContactShadows CPU            = " << getAvg(static_cast<size_t>(PerfStage::ContactShadows)) << " ms\n";
+            ss << "  HeightFog CPU                 = " << getAvg(static_cast<size_t>(PerfStage::HeightFog)) << " ms\n";
+            ss << "  DirectionalVolumetricRaymarch = " << getAvg(static_cast<size_t>(PerfStage::DirectionalVolumetricRaymarch)) << " ms\n";
+            ss << "  VolumetricTemporal            = " << getAvg(static_cast<size_t>(PerfStage::VolumetricTemporal)) << " ms\n";
+            ss << "  VolumetricUpsample            = " << getAvg(static_cast<size_t>(PerfStage::VolumetricUpsample)) << " ms\n";
+            ss << "  SunRadialGlare                = " << getAvg(static_cast<size_t>(PerfStage::SunRadialGlare)) << " ms\n";
+            ss << "  PostProcess                   = " << getAvg(static_cast<size_t>(PerfStage::PostProcess)) << " ms\n";
+            ss << "  TotalInjectedFrame CPU        = " << getAvg(static_cast<size_t>(PerfStage::TotalInjectedFrame)) << " ms\n";
+        }
 
         if (m_gpuProfilingEnabled && m_gpuQueriesSupported)
         {

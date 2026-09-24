@@ -28,24 +28,18 @@ namespace renderer
             stateBits
         };
 
+        auto it = m_cache.find(key);
+        if (it != m_cache.end())
         {
-            std::lock_guard lock(m_mutex);
-            auto it = m_cache.find(key);
-            if (it != m_cache.end())
-            {
-                ++m_cacheHits;
-                return it->second;
-            }
+            ++m_cacheHits;
+            return it->second;
         }
 
         DrawClassification result = ClassifyInternal(
             device, ctx, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
 
-        {
-            std::lock_guard lock(m_mutex);
-            ++m_cacheMisses;
-            m_cache.emplace(key, result);
-        }
+        ++m_cacheMisses;
+        m_cache.emplace(key, result);
 
         return result;
     }
@@ -158,7 +152,6 @@ namespace renderer
 
     void DrawCallClassifier::ClearCache()
     {
-        std::lock_guard lock(m_mutex);
         m_cache.clear();
     }
 }

@@ -22,7 +22,6 @@ namespace renderer
         VolumetricUpsample,
         SunRadialGlare,
         PostProcess,
-        Water,
         TotalInjectedFrame,
         StageCount
     };
@@ -43,6 +42,9 @@ namespace renderer
         static PerformanceProfiler& Instance();
 
         void SetLogPath(const std::wstring& path);
+        void SetCpuProfilingEnabled(bool enabled) { m_cpuProfilingEnabled = enabled; }
+        bool IsCpuProfilingEnabled() const { return m_cpuProfilingEnabled; }
+
         void SetGpuProfilingEnabled(bool enabled) { m_gpuProfilingEnabled = enabled; }
         bool IsGpuProfilingEnabled() const { return m_gpuProfilingEnabled; }
 
@@ -63,6 +65,7 @@ namespace renderer
         void EnsureGpuQueries(IDirect3DDevice9* device);
 
         std::wstring m_logPath;
+        bool m_cpuProfilingEnabled = false;
         bool m_gpuProfilingEnabled = false;
         LARGE_INTEGER m_qpcFrequency{};
 
@@ -99,14 +102,20 @@ namespace renderer
         explicit ScopedCpuTimer(PerfStage stage)
             : m_stage(stage)
         {
-            QueryPerformanceCounter(&m_start);
+            if (PerformanceProfiler::Instance().IsCpuProfilingEnabled())
+            {
+                QueryPerformanceCounter(&m_start);
+            }
         }
 
         ~ScopedCpuTimer()
         {
-            LARGE_INTEGER end;
-            QueryPerformanceCounter(&end);
-            PerformanceProfiler::Instance().RecordCpuTime(m_stage, m_start, end);
+            if (m_start.QuadPart != 0)
+            {
+                LARGE_INTEGER end;
+                QueryPerformanceCounter(&end);
+                PerformanceProfiler::Instance().RecordCpuTime(m_stage, m_start, end);
+            }
         }
 
     private:

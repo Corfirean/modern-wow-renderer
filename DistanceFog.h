@@ -1,6 +1,7 @@
 #pragma once
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
+#include "src/D3D9/TrackedRenderState.h"
 namespace distancefog {
 bool enabled=false,active=true,keyDown=false,showStatus=true,hotkey=true,effectEnabled=true;
 float distanceScale=1.2f,powerScale=1.08f;
@@ -28,9 +29,7 @@ struct Scope {
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
         try {
-            Microsoft::WRL::ComPtr<IDirect3DVertexShader9> vs;
-            if(FAILED(d->GetVertexShader(vs.GetAddressOf()))||!vs)return;
-            uint64_t hash = renderer::ShaderCache::Instance().GetShaderHash(vs.Get());
+            uint64_t hash = renderer::g_trackedState.vsHash;
             if(!hash)return;
             // Registers verified from captured shader instructions, not guessed globally.
             switch(hash) {

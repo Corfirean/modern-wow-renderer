@@ -1,4 +1,5 @@
 #pragma once
+#include "src/D3D9/TrackedRenderState.h"
 namespace waterreflection {
 using Microsoft::WRL::ComPtr;
 struct Resources{
@@ -15,11 +16,9 @@ inline std::wstring logPath;
 inline void Configure(const std::wstring& base){logPath=base+L"WaterReflection.log";}
 inline void ClearInput(){watereffect::reflectionScene=nullptr;watereffect::reflectionDepth=nullptr;memset(watereffect::reflectionData,0,sizeof(watereffect::reflectionData));}
 
-inline bool IsWater(IDirect3DDevice9* d){
- ComPtr<IDirect3DPixelShader9> ps;ComPtr<IDirect3DVertexShader9> vs;
- if(FAILED(d->GetPixelShader(ps.GetAddressOf()))||FAILED(d->GetVertexShader(vs.GetAddressOf()))||!ps||!vs)return false;
- auto psHash=volume::Hash(ps.Get());
- auto vsHash=volume::Hash(vs.Get());
+inline bool IsWater(IDirect3DDevice9* /*d*/){
+ uint64_t psHash = renderer::g_trackedState.psHash;
+ uint64_t vsHash = renderer::g_trackedState.vsHash;
  return (psHash==0x17f042a7906ca126ull||psHash==0x7d4f078fa1876a09ull)&&
         (vsHash==0x206d861fd0a721ddull||vsHash==0xfdd9528ed3ac30eaull);
 }
@@ -59,6 +58,6 @@ inline void Prepare(IDirect3DDevice9* d){
 }
 
 inline void Finish(){ClearInput();ready=false;}
-inline void Reset(IDirect3DDevice9* d){Finish();resources.surface.Reset();resources.scene.Reset();resources.owner=nullptr;resources.width=resources.height=0;}
+inline void Reset(IDirect3DDevice9* /*d*/){Finish();resources.surface.Reset();resources.scene.Reset();resources.owner=nullptr;resources.width=resources.height=0;}
 inline void Present(){if((copiedFrames+failedFrames)%600==120)std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"copied="<<copiedFrames<<" failed="<<failedFrames<<'\n';Finish();}
 }

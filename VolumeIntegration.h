@@ -8,6 +8,7 @@
 #include "src/Diagnostics/PerformanceProfiler.h"
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
+#include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/ScopedRenderState.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
@@ -236,7 +237,7 @@ void ReloadTuning() {
     fogEffectEnabled = ReadTuning(L"FogEnabled", 1) != 0;
     shaftsEffectEnabled = ReadTuning(L"ShaftsEnabled", 1) != 0;
     shadowsEffectEnabled = ReadTuning(L"ShadowsEnabled", 1) != 0;
-    shadowMapEnabled = ReadTuning(L"ShadowMapEnabled", 1) != 0;
+    shadowMapEnabled = ReadTuning(L"ShadowMapEnabled", 0) != 0;
     shadowMapUpdateInterval = UINT(std::clamp(ReadTuning(L"ShadowMapUpdateInterval", 2), 1, 10));
     volumetricCharacterShadows = ReadTuning(L"VolumetricCharacterShadows", 0) != 0;
     cloudShadowsEffectEnabled = ReadTuning(L"CloudShadowsEnabled", 1) != 0;
@@ -572,9 +573,9 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
     d->SetViewport(&oldVp);
     d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
     d->SetRenderState(D3DRS_ZENABLE, zEnable);
-    d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+    d->SetRenderState(D3DRS_ZWRITEENABLE, renderer::g_trackedState.zWrite ? TRUE : FALSE);
     d->SetRenderState(D3DRS_ZFUNC, zFunc);
-    d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    d->SetRenderState(D3DRS_ALPHABLENDENABLE, renderer::g_trackedState.alphaBlend ? TRUE : FALSE);
     d->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
     d->SetRenderState(D3DRS_DEPTHBIAS, oldDepthBias);
     d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, oldSlopeBias);
@@ -949,22 +950,19 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
 
 void BeforeDraw(IDirect3DDevice9* d) {
     if (!enabled || !active || internal || owner != d || composed) return;
+
+    bool isUi = (renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
+                 renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull);
+
+    if (ready && !isUi) return;
+
     try {
         ComPtr<IDirect3DSurface9> rt, ds;
         if (FAILED(d->GetRenderTarget(0, rt.GetAddressOf())) || rt.Get() != target.Get() || FAILED(getDepth(d, ds.GetAddressOf()))) return;
-        ComPtr<IDirect3DVertexShader9> vs;
-        if (FAILED(d->GetVertexShader(vs.GetAddressOf()))) return;
-        auto hash = Hash(vs.Get());
-        cameraCaptureShaderHash = hash;
+        cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
         if (!ready && ds.Get() == surface.Get()) {
             ready = CaptureCamera(d);
             if (ready) ++cameraFrames;
-        }
-        bool isUi = (hash == 0xd9e7756460af6296ull);
-        if (!isUi) {
-            ComPtr<IDirect3DPixelShader9> curPs;
-            if (SUCCEEDED(d->GetPixelShader(curPs.GetAddressOf())) && Hash(curPs.Get()) == 0xc29c7060b723c0c6ull)
-                isUi = true;
         }
         if (!ready || !isUi) return;
         composed = true;

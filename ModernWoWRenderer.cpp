@@ -21,6 +21,7 @@
 #include "src/Diagnostics/RendererDiagnostics.h"
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
+#include "src/D3D9/TrackedRenderState.h"
 #include "src/Scene/DrawCallClassifier.h"
 
 namespace
@@ -165,105 +166,119 @@ HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD
     renderer::RendererDiagnostics::Instance().OnFrameBegin();
     volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
 }
+using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
+using SetVertexDeclarationFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexDeclaration9*);
+using SetFVFFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD);
+using SetVertexShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexShader9*);
+using SetPixelShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DPixelShader9*);
+
+SetRenderStateFn originalSetRenderState = nullptr;
+SetVertexDeclarationFn originalSetVertexDeclaration = nullptr;
+SetFVFFn originalSetFVF = nullptr;
+SetVertexShaderFn originalSetVertexShader = nullptr;
+SetPixelShaderFn originalSetPixelShader = nullptr;
+
+HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* vs)
+{
+    renderer::g_trackedState.currentVS = vs;
+    renderer::g_trackedState.vsHash = vs ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
+    return originalSetVertexShader(d, vs);
+}
+
+HRESULT WINAPI HookedSetPixelShader(IDirect3DDevice9* d, IDirect3DPixelShader9* ps)
+{
+    renderer::g_trackedState.currentPS = ps;
+    renderer::g_trackedState.psHash = ps ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
+    return originalSetPixelShader(d, ps);
+}
+
+HRESULT WINAPI HookedSetVertexDeclaration(IDirect3DDevice9* d, IDirect3DVertexDeclaration9* decl)
+{
+    renderer::g_trackedState.currentVDecl = decl;
+    return originalSetVertexDeclaration(d, decl);
+}
+
+HRESULT WINAPI HookedSetFVF(IDirect3DDevice9* d, DWORD fvf)
+{
+    renderer::g_trackedState.currentFVF = fvf;
+    return originalSetFVF(d, fvf);
+}
+
+HRESULT WINAPI HookedSetRenderState(IDirect3DDevice9* d, D3DRENDERSTATETYPE state, DWORD val)
+{
+    switch (state)
+    {
+    case D3DRS_ALPHABLENDENABLE: renderer::g_trackedState.alphaBlend = (val != 0); break;
+    case D3DRS_ALPHATESTENABLE:  renderer::g_trackedState.alphaTest = (val != 0); break;
+    case D3DRS_ZWRITEENABLE:     renderer::g_trackedState.zWrite = (val != 0); break;
+    case D3DRS_ZENABLE:          renderer::g_trackedState.zEnable = (val != 0); break;
+    default: break;
+    }
+    return originalSetRenderState(d, state, val);
+}
+
 renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT n)
 {
     renderer::DrawCallContext ctx;
     ctx.primitiveType = t;
     ctx.primitiveCount = n;
-
-    IDirect3DVertexShader9* vs = nullptr;
-    if (SUCCEEDED(d->GetVertexShader(&vs)) && vs)
-    {
-        ctx.vertexShader = vs;
-        ctx.vsHash = renderer::ShaderCache::Instance().GetShaderHash(vs);
-        vs->Release();
-    }
-
-    IDirect3DPixelShader9* ps = nullptr;
-    if (SUCCEEDED(d->GetPixelShader(&ps)) && ps)
-    {
-        ctx.pixelShader = ps;
-        ctx.psHash = renderer::ShaderCache::Instance().GetShaderHash(ps);
-        ps->Release();
-    }
-
-    DWORD alphaBlend = 0, alphaTest = 0, zWrite = 1, zEnable = 1;
-    d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
-    d->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
-    d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
-    d->GetRenderState(D3DRS_ZENABLE, &zEnable);
-    ctx.alphaBlend = (alphaBlend != 0);
-    ctx.alphaTest = (alphaTest != 0);
-    ctx.zWrite = (zWrite != 0);
-    ctx.zEnable = (zEnable != 0);
+    ctx.vertexShader = renderer::g_trackedState.currentVS;
+    ctx.pixelShader = renderer::g_trackedState.currentPS;
+    ctx.vertexDecl = renderer::g_trackedState.currentVDecl;
+    ctx.vsHash = renderer::g_trackedState.vsHash;
+    ctx.psHash = renderer::g_trackedState.psHash;
+    ctx.alphaBlend = renderer::g_trackedState.alphaBlend;
+    ctx.alphaTest = renderer::g_trackedState.alphaTest;
+    ctx.zWrite = renderer::g_trackedState.zWrite;
+    ctx.zEnable = renderer::g_trackedState.zEnable;
 
     auto dc = renderer::DrawCallClassifier::Instance().Classify(
         d, ctx, volume::capturedViewTranslation, volume::capturedViewValid, volume::cameraCaptureShaderHash);
     renderer::RendererDiagnostics::Instance().RecordDrawCall(dc);
     return dc;
 }
+
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
     if(volume::internal)return originalDraw(d,t,start,n);
-    renderer::DrawClassification dc{};
-    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
-    {
-        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
-        if(!g_drawingOverlay)waterreflection::Prepare(d);
-        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitive",t,n);
-        waterhighlight::Scope tint(d,g_drawingOverlay);
-        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    }
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     return originalDraw(d,t,start,n);
 }
+
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
-    renderer::DrawClassification dc{};
-    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
-    {
-        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
-        if(!g_drawingOverlay)waterreflection::Prepare(d);
-        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
-        waterhighlight::Scope tint(d,g_drawingOverlay);
-        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    }
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     return originalDrawIndexed(d,t,base,min,vertices,start,n);
 }
+
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
     if(volume::internal)return originalDrawUP(d,t,n,v,stride);
-    renderer::DrawClassification dc{};
-    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
-    {
-        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
-        if(!g_drawingOverlay)waterreflection::Prepare(d);
-        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
-        waterhighlight::Scope tint(d,g_drawingOverlay);
-        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    }
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     return originalDrawUP(d,t,n,v,stride);
 }
+
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
     if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
-    renderer::DrawClassification dc{};
-    if(!g_drawingOverlay)dc = ClassifyCurrentDraw(d,t,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
-    if(!g_drawingOverlay && dc.castsShadow)volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
-    {
-        renderer::ScopedCpuTimer waterTimer(renderer::PerfStage::Water);
-        if(!g_drawingOverlay)waterreflection::Prepare(d);
-        if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
-        waterhighlight::Scope tint(d,g_drawingOverlay);
-        distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-        watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    }
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
 }
 
@@ -280,16 +295,28 @@ void HookDevice(IDirect3DDevice9* device)
         return;
     }
     DWORD oldProtect = 0;
-    if (!VirtualProtect(&table[16], 69*sizeof(void*), PAGE_READWRITE, &oldProtect))
+    if (!VirtualProtect(&table[16], 95*sizeof(void*), PAGE_READWRITE, &oldProtect))
         return;
     g_originalEndScene = reinterpret_cast<EndSceneFn>(table[42]);
     originalReset=reinterpret_cast<ResetFn>(table[16]);
     originalPresent=reinterpret_cast<PresentFn>(table[17]);
+    originalSetRenderState=reinterpret_cast<SetRenderStateFn>(table[57]);
     originalDraw=reinterpret_cast<DrawFn>(table[81]);
     originalDrawIndexed=reinterpret_cast<DrawIndexedFn>(table[82]);
     originalDrawUP=reinterpret_cast<DrawUPFn>(table[83]);
     originalDrawIndexedUP=reinterpret_cast<DrawIndexedUPFn>(table[84]);
+    originalSetVertexDeclaration=reinterpret_cast<SetVertexDeclarationFn>(table[87]);
+    originalSetFVF=reinterpret_cast<SetFVFFn>(table[89]);
+    originalSetVertexShader=reinterpret_cast<SetVertexShaderFn>(table[92]);
+    originalSetPixelShader=reinterpret_cast<SetPixelShaderFn>(table[107]);
+
     InterlockedExchangePointer(&table[42], reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[57], reinterpret_cast<void*>(HookedSetRenderState));
+    InterlockedExchangePointer(&table[87], reinterpret_cast<void*>(HookedSetVertexDeclaration));
+    InterlockedExchangePointer(&table[89], reinterpret_cast<void*>(HookedSetFVF));
+    InterlockedExchangePointer(&table[92], reinterpret_cast<void*>(HookedSetVertexShader));
+    InterlockedExchangePointer(&table[107], reinterpret_cast<void*>(HookedSetPixelShader));
+
     if(waterdiag::enabled || waterhighlight::enabled || watereffect::enabled || distancefog::enabled || volume::enabled || unified) {
         InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
         InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
@@ -308,9 +335,9 @@ void HookDevice(IDirect3DDevice9* device)
         InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
     }
     DWORD ignored = 0;
-    VirtualProtect(&table[16], 69*sizeof(void*), oldProtect, &ignored);
+    VirtualProtect(&table[16], 95*sizeof(void*), oldProtect, &ignored);
     g_hookedTable = table;
-    Log("D3D9 device hooked; see INI for atmosphere/diagnostics switches.");
+    Log("D3D9 device hooked with fast state tracking; see INI for atmosphere/diagnostics switches.");
 }
 
 class Direct3D9Proxy final : public IDirect3D9

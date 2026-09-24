@@ -1,6 +1,7 @@
 #pragma once
 #include <unordered_set>
 #include <cstdio>
+#include "src/D3D9/TrackedRenderState.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 bool enabled=false, active=true, keyDown=false, hotkey=true;
@@ -321,6 +322,12 @@ struct Scope {
     DWORD oldSampler[2][6]{};bool extraState=false;
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
+        // Fast early exit: only water shaders need the rest of this expensive setup
+        uint64_t psHash = renderer::g_trackedState.psHash;
+        uint64_t vsHash = renderer::g_trackedState.vsHash;
+        if ((psHash!=0x17f042a7906ca126ull && psHash!=0x7d4f078fa1876a09ull) ||
+            (vsHash!=0x206d861fd0a721ddull && vsHash!=0xfdd9528ed3ac30eaull))
+            return;
         try {
             // Check texture layout: slot 0 is 8x64 ripple LUT, slot 1 is 512x512 wave normal
             for(unsigned slot=0;slot<2;++slot) {
@@ -331,8 +338,9 @@ struct Scope {
                 if(slot==0&&(desc.Width!=8||desc.Height!=64))return;
                 if(slot==1&&(desc.Width!=512||desc.Height!=512))return;
             }
-            if(FAILED(d->GetPixelShader(original.GetAddressOf()))||!original)return;
-            if(FAILED(d->GetVertexShader(originalVertex.GetAddressOf()))||!originalVertex)return;
+            original = renderer::g_trackedState.currentPS;
+            originalVertex = renderer::g_trackedState.currentVS;
+            if(!original || !originalVertex)return;
             if(FAILED(d->GetPixelShaderConstantF(200,old,9)))return;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
             float controls[36]={float(GetTickCount64()%600000)*.001f,strength,normalStrength,specularStrength};
