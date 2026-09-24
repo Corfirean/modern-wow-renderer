@@ -12,6 +12,11 @@
 // disprove the hypothesis, not to assert it.
 //
 // Classification (must ALL hold - same signature the F9 capture found):
+//   - primitive count <= 8 (a couple of quads at most - this is what
+//     actually separates the sun/moon disc from the sky dome/gradient mesh:
+//     both can share fixed-function + zero-translation-VIEW + large WORLD
+//     scale, since they're all skybox layers, but the dome is a large mesh
+//     and the disc is one or two triangles)
 //   - fixed-function vertex AND pixel processing (no VS/PS bound)
 //   - alpha blend AND alpha test both on
 //   - a texture bound on stage 0
@@ -45,8 +50,9 @@ void ReloadTuning(const std::wstring& base) {
 struct Scope {
     IDirect3DDevice9* device=nullptr;
     bool changed=false;
-    explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
+    explicit Scope(IDirect3DDevice9* d,UINT primitiveCount,bool skip=false) noexcept {
         if(skip||!enabled||!codeReady)return;
+        if(primitiveCount>8)return;
         try {
             ComPtr<IDirect3DVertexShader9> vs;
             if(FAILED(d->GetVertexShader(vs.GetAddressOf()))||vs)return;
