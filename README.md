@@ -88,23 +88,73 @@ Launch the game normally. Press **`F7`** in-game to adjust settings or **`F11`**
 
 ---
 
-## Repository Structure
+## Repository Structure & Architecture
+
+The codebase has undergone a modular architectural refactoring to decouple Direct3D9 low-level hooks from high-level rendering effects, enabling future expansion to advanced techniques (Cascaded Shadow Maps, GTAO/HBAO, improved SSR, temporal effects, bloom, tonemapping, and potential D3D11/D3D12 backends):
 
 ```text
-├── ModernWoWRenderer.cpp   # Proxy DLL entry point, D3D9 device hooks, and render passes
-├── d3d9.def                # D3D9 proxy function exports
-├── ModernWoWRenderer.sln   # Visual Studio solution
-├── ModernWoWRenderer.vcxproj # Visual Studio project
-├── VolumeIntegration.h    # Camera matrix capture, depth buffer management, pass pipeline
-├── VolumeEffects.h        # HLSL shaders for fog, sun shafts, radial blur, and contact shadows
-├── WaterEffect.h          # Water surface shaders, normal maps, and foam rendering
-├── WaterReflection.h      # Screen-space reflections (SSR) and planar fallback
-├── WaterHighlight.h       # Specular sun glint and lighting calculations
-├── DistanceFog.h          # Legacy distance fog override and hook
-├── TuningOverlay.h        # In-game interactive F7 tuning overlay
-├── WaterDiagnostics.h     # Bounded draw-call capture and diagnostic utilities
-├── ModernWoWRenderer.ini  # Main proxy configuration file
-├── GraphicsEffects.ini    # Live graphical tuning parameters
-├── .gitignore             # Git ignore rules for build artifacts
-└── README.md              # Project documentation
+ModernWoWRenderer/
+├── src/
+│   ├── Core/                  # Foundational math, frame context, and caching
+│   │   ├── MathTypes.h        # Vector2/3/4 and Matrix4 abstractions
+│   │   ├── FrameContext.h/.cpp # Frame-level view/projection, depth, and lighting state
+│   │   └── ShaderCache.h/.cpp # O(1) thread-safe FNV-1a shader hashing & pointer cache
+│   ├── D3D9/                  # Direct3D 9 low-level hardware capture & state
+│   │   ├── DepthCapture.h/.cpp # INTZ depth stencil buffer replacement & hook redirects
+│   │   └── CameraCapture.h/.cpp# WoW vertex constant (c0..c26) extraction & celestial tracking
+│   ├── Scene/                 # Scene analysis and draw-call classification
+│   │   ├── MaterialType.h     # Material classification flags (M2, WMO, Terrain, Water, UI)
+│   │   ├── DrawCallContext.h  # Draw-call pipeline state key & hashing
+│   │   └── DrawCallClassifier.h/.cpp # Fast cached draw-call classification
+│   ├── Diagnostics/           # Telemetry and diagnostics
+│   │   └── RendererDiagnostics.h/.cpp # Frame & draw metrics aggregated every 600 frames
+│   └── Effects/               # Modular post-processing and lighting passes
+│
+├── ModernWoWRenderer.cpp      # D3D9 proxy DLL exports & main hook dispatch
+├── VolumeIntegration.h        # Volumetric lighting & atmospheric pipeline
+├── VolumeEffects.h            # HLSL shaders (god rays, radial blur, height fog, contact shadows)
+├── WaterEffect.h              # Water replacement shaders and vertex displacement
+├── WaterReflection.h          # Screen-space reflections (SSR)
+├── WaterHighlight.h           # Water specular glint
+├── DistanceFog.h              # Fog override hooks
+├── TuningOverlay.h            # In-game interactive F7 tuning overlay
+├── ModernWoWRenderer.ini      # Core proxy settings
+├── GraphicsEffects.ini        # Live graphical tuning parameters
+├── ModernWoWRenderer.sln      # Solution file
+├── ModernWoWRenderer.vcxproj  # Project file
+├── d3d9.def                   # Proxy export definitions
+├── .gitignore                 # Minimal git rules (no binaries or test dumps)
+└── README.md                  # Project documentation
 ```
+
+---
+
+## Architectural Highlights & Performance
+
+- **Zero Per-Draw Allocations:** All shader bytecode queries (`GetFunction`) and heap allocations (`std::vector<BYTE>`) in hot draw loops have been replaced with a pointer-based `ShaderCache` utilizing FNV-1a hashing.
+- **Shader Compilation Re-use:** Shaders are compiled and instantiated once per device rather than recreated on each draw call.
+- **Centralized DrawCallClassifier:** Decouples geometry identification (M2 characters/creatures, WMO structures, Terrain chunks, Water, UI) into a cached, reusable classifier.
+- **Aggregated Diagnostics:** Telemetry counters (draw calls, classified vs. unknown, cache hits/misses, camera captures) are aggregated and logged periodically without causing I/O hitches.
+
+---
+
+## Roadmap
+
+- [x] **Phase 1: Core Architecture & Diagnostics**
+  - Modular directory layout (`Core`, `D3D9`, `Scene`, `Diagnostics`, `Effects`)
+  - `MathTypes`, `FrameContext`, `ShaderCache`, `RendererDiagnostics`
+  - `DepthCapture` INTZ extraction & `CameraCapture` matrix extraction
+  - `DrawCallClassifier` with pipeline state caching
+- [ ] **Phase 2: Shadow & Ambient Occlusion Modernization**
+  - True Cascaded Shadow Maps (CSM) with light-space orthographic frustums
+  - Ground Truth Ambient Occlusion (GTAO) / Horizon-Based Ambient Occlusion (HBAO)
+- [ ] **Phase 3: Screen-Space Reflections (SSR) & Water Overhaul**
+  - Hi-Z depth tracing / temporal reprojection for reflections
+  - Fresnel reflection curves and depth-based light extinction
+- [ ] **Phase 4: Post-Processing & Temporal Pipeline**
+  - Physically based Bloom (dual-filtering downsample/upsample)
+  - ACES / Reinhard Tonemapping & Color Grading
+  - Temporal Anti-Aliasing (TAA) / Motion Vectors
+- [ ] **Phase 5: Modern Backend Abstraction**
+  - Potential D3D11 / D3D12 render path via proxy translation
+
