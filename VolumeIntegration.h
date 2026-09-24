@@ -98,7 +98,7 @@ uint64_t cameraCaptureShaderHash = 0;
 float capturedViewTranslation[3]{};
 bool capturedViewValid = false;
 float baseHeight = 60, density = .004f, falloff = .07f, strength = 2.6f, moonStrength = .35f, variation = 1.35f, lowLayer = .35f, raySoftness = 5.f, rayFalloff = 2.f, fogWash = .45f, sunVerticalScale = .4f, sunOffsetX = 0, sunOffsetY = 0, localLightStrength = .8f, localLightThreshold = .25f, sunSourceThreshold = .60f;
-float contactShadowStrength = .28f, contactShadowRadius = 10.f, directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f, localLightRadius = 140.f;
+float contactShadowStrength = .28f, contactShadowRadius = 10.f, contactShadowMaxDistance = 6.f, directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f, localLightRadius = 140.f;
 UINT configuredShadowMapSize = 1024;
 int brightnessPercent = 0, contrastPercent = 100, gammaPercent = 100, sharpnessPercent = 35;
 int sunGlowPercent = 150;
@@ -266,6 +266,11 @@ void ReloadTuning() {
     sunSourceThreshold = std::clamp(ReadTuning(L"SunSourceThresholdPercent", 60), 10, 95) * .01f;
     contactShadowStrength = std::clamp(ReadTuning(L"ContactShadowPercent", 25), 0, 70) * .01f;
     contactShadowRadius = float(std::clamp(ReadTuning(L"ContactShadowRadiusPixels", 10), 2, 24));
+    // Genuinely local: a "contact" shadow grounds objects and shades creases.
+    // Long-range occlusion belongs to the light-space directional shadow map,
+    // never to this screen-space depth raymarch (off-screen occluders don't
+    // exist here, which is what produced ghosting/disocclusion at long range).
+    contactShadowMaxDistance = float(std::clamp(ReadTuning(L"ContactShadowRangeUnits", 6), 2, 20));
     directionalShadowStrength = std::clamp(ReadTuning(L"DirectionalShadowPercent", 45), 0, 100) * .01f;
     shadowMapDistance = float(std::clamp(ReadTuning(L"ShadowMapDistance", ReadTuning(L"ShadowReach", 180)), 50, 300));
     configuredShadowMapSize = UINT(std::clamp(ReadTuning(L"ShadowMapSize", 1024), 256, 4096));
@@ -690,44 +695,41 @@ bool Composite(IDirect3DDevice9* d) {
     check(d->SetPixelShaderConstantF(0, constants[0], 13));
 
     // Screen-space contact shadows.
-    // Rendered and composited at FULL resolution, straight onto target: the
-    // raymarch shader already produces analytic soft edges via smoothstep, so
-    // no extra blur pass is needed. A half-res mask upsampled through a
-    // depth-unaware blur was smearing shadow onto whatever sat behind a
-    // silhouette edge (halo / doubled-image leakage) - this composites the
-    // exact per-pixel result instead.
+    // Rendered DIRECTLY onto the bound scene target (`target`, already the
+    // active render target here) with a ZERO/SRCCOLOR modulate blend - no
+    // intermediate render target at all. The previous version wrote this
+    // pass into `legacyTargets.rayA`, a texture allocated at HALF resolution
+    // (rayWidth/rayHeight), while setting a FULL-resolution viewport and
+    // drawing a full-resolution quad into it: the rasterizer clips to the
+    // actual half-size surface, so only a quarter of the intended shadow
+    // data was ever written, then sampled back over the full screen. That
+    // size mismatch - not the blur - is what produced the large moving
+    // ghost/projection artifacts. Writing straight to the real full-res
+    // target removes the mismatch entirely, and also removes two full-screen
+    // passes (the old copy+blend) that this used to cost.
+    // The trace range is also now genuinely local: this is a *contact*
+    // shadow (grounding/creases), not a stand-in for directional shadows -
+    // long-range occlusion belongs to the light-space shadow map below.
     if (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
         renderer::ScopedCpuTimer contactTimer(renderer::PerfStage::ContactShadows);
-        check(d->SetRenderTarget(0, legacyTargets.rayASurface.Get()));
-        D3DVIEWPORT9 fullResVp{ 0, 0, desc.Width, desc.Height, 0, 1 };
-        check(d->SetViewport(&fullResVp));
         check(d->SetPixelShader(legacyShaders.contactShadow.Get()));
         check(d->SetTexture(0, depth.Get()));
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
         float shadowTuning[4] = { 1.f / desc.Width, 1.f / desc.Height, contactShadowStrength,
-                                  std::clamp(shadowMapDistance * .35f, 12.f, 90.f) };
+                                  contactShadowMaxDistance };
         float contactShadowProjection[4] = { constants[0][0], constants[0][1], constants[0][2], constants[0][3] };
         float contactShadowLight[4] = { constants[10][0], constants[10][1], constants[10][2], constants[2][3] };
         check(d->SetPixelShaderConstantF(0, shadowTuning, 1));
         check(d->SetPixelShaderConstantF(1, contactShadowProjection, 1));
         check(d->SetPixelShaderConstantF(2, contactShadowLight, 1));
-        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-        if (ok) drawQuad(desc.Width, desc.Height);
-
-        check(d->SetTexture(0, nullptr));
-        check(d->SetRenderTarget(0, target.Get()));
-        check(d->SetViewport(&fullVp));
-        check(d->SetPixelShader(legacyShaders.copy.Get()));
-        check(d->SetTexture(0, legacyTargets.rayA.Get()));
-        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
-        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
         check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ZERO));
         check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_SRCCOLOR));
         if (ok) drawQuad(desc.Width, desc.Height);
 
         check(d->SetTexture(0, nullptr));
+        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
         check(d->SetPixelShader(legacyShaders.volume.Get()));
         check(d->SetTexture(1, depth.Get()));
         check(d->SetTexture(2, resources.noise.Get()));
