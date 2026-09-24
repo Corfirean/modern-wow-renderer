@@ -24,6 +24,7 @@ copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"</Command></PostB
     <ClCompile Include="src\Diagnostics\PerformanceProfiler.cpp" />
     <ClCompile Include="src\Effects\DirectionalVolumetricLighting.cpp" />
     <ClCompile Include="src\Diagnostics\CelestialMemoryProbe.cpp" />
+    <ClCompile Include="src\D3D9\CelestialTracker.cpp" />
     <ClInclude Include="src\Core\MathTypes.h" />
     <ClInclude Include="src\Core\FrameContext.h" />
     <ClInclude Include="src\Core\ShaderCache.h" />
@@ -38,6 +39,7 @@ copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"</Command></PostB
     <ClInclude Include="src\Effects\DirectionalVolumetricLighting.h" />
     <ClInclude Include="src\Diagnostics\CelestialMemoryProbe.h" />
     <ClInclude Include="src\Diagnostics\CelestialDrawDiagnostics.h" />
+    <ClInclude Include="src\D3D9\CelestialTracker.h" />
     <None Include="d3d9.def" />
     <None Include="ModernWoWRenderer.ini" />
     <None Include="GraphicsEffects.ini" />

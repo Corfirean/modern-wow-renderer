@@ -13,6 +13,7 @@
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
+#include "src/D3D9/CelestialTracker.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -372,6 +373,7 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
         ++frameCtx.frameIndex;
         frameCtx.device = d;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
+        renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
     }
 }
 
@@ -646,6 +648,38 @@ bool Composite(IDirect3DDevice9* d) {
 
     if (!EnsureNoise(d)) return false;
     if (!legacyShaders.Ensure(d)) return false;
+
+    // Real celestial source override. Replaces the v[24]-projection
+    // ("assume the light-direction shader constant is the disc's screen
+    // position") that in-game testing disproved. CelestialTracker
+    // intercepts the actual sun/moon billboard draw call each frame (see
+    // src/D3D9/CelestialTracker.h for the two confirmed draw signatures)
+    // and reports its true screen position and view direction - only for
+    // frames where that draw call actually happened, so an off-screen or
+    // below-horizon body naturally yields no source instead of a guessed
+    // one. constants[2]/constants[10] are re-uploaded to the shaders below
+    // via SetPixelShaderConstantF, so overriding them here in place before
+    // any of those uploads happen is sufficient - no separate plumbing.
+    {
+        const renderer::CelestialBody& sun = renderer::CelestialTracker::Instance().Sun();
+        const renderer::CelestialBody& moon = renderer::CelestialTracker::Instance().Moon();
+        bool useSun = sun.visible && celestialDaylight > 0.02f;
+        bool useMoon = !useSun && moon.visible;
+        const renderer::CelestialBody* body = useSun ? &sun : (useMoon ? &moon : nullptr);
+        if (body) {
+            constants[2][0] = body->screenX;
+            constants[2][1] = body->screenY;
+            constants[2][2] = useSun
+                ? strength * celestialDaylight
+                : strength * moonStrength * celestialMoonlight;
+            constants[10][0] = body->viewSpaceDirection.x;
+            constants[10][1] = body->viewSpaceDirection.y;
+            constants[10][2] = body->viewSpaceDirection.z;
+            constants[10][3] = 0.f;
+        } else {
+            constants[2][2] = 0.f;
+        }
+    }
 
     D3DSURFACE_DESC desc{};
     if (FAILED(target->GetDesc(&desc))) return false;
