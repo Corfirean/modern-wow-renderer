@@ -1,0 +1,340 @@
+#include <windows.h>
+#include <d3d9.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <string>
+#include <mutex>
+#include "WaterDiagnostics.h"
+#include "WaterHighlight.h"
+#include "WaterEffect.h"
+#include "DistanceFog.h"
+#include "VolumeIntegration.h"
+#include "WaterReflection.h"
+#include "TuningOverlay.h"
+
+namespace
+{
+using Direct3DCreate9Fn = IDirect3D9* (WINAPI*)(UINT);
+using Direct3DCreate9ExFn = HRESULT (WINAPI*)(UINT, IDirect3D9Ex**);
+using EndSceneFn = HRESULT (WINAPI*)(IDirect3DDevice9*);
+using PresentFn = HRESULT (WINAPI*)(IDirect3DDevice9*,const RECT*,const RECT*,HWND,const RGNDATA*);
+using ResetFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRESENT_PARAMETERS*);
+using DrawFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,UINT);
+using DrawIndexedFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,INT,UINT,UINT,UINT,UINT);
+using DrawUPFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,const void*,UINT);
+using DrawIndexedUPFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,UINT,UINT,const void*,D3DFORMAT,const void*,UINT);
+PresentFn originalPresent=nullptr;
+ResetFn originalReset=nullptr;
+DrawFn originalDraw=nullptr;
+DrawIndexedFn originalDrawIndexed=nullptr;
+DrawUPFn originalDrawUP=nullptr;
+DrawIndexedUPFn originalDrawIndexedUP=nullptr;
+using ClearFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,const D3DRECT*,DWORD,D3DCOLOR,float,DWORD);
+ClearFn originalClear=nullptr;
+bool unified=false,graphicsActive=true,graphicsKeyDown=false,graphicsShowStatus=false,tuningKeyDown=false;
+
+struct Settings
+{
+    bool enabled = true;
+    BYTE fogOpacity = 42;
+    BYTE fogRed = 86, fogGreen = 118, fogBlue = 145;
+    BYTE raysOpacity = 36;
+    float fogHeight = 0.58f;
+    float sunX = 0.72f, sunY = 0.18f;
+};
+
+struct Vertex { float x, y, z, rhw; D3DCOLOR color; };
+constexpr DWORD VERTEX_FVF = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
+
+HMODULE g_systemD3D9 = nullptr;
+Direct3DCreate9Fn g_realCreate9 = nullptr;
+Direct3DCreate9ExFn g_realCreate9Ex = nullptr;
+EndSceneFn g_originalEndScene = nullptr;
+std::mutex g_hookMutex;
+void** g_hookedTable = nullptr;
+std::once_flag g_initialize;
+thread_local bool g_drawingOverlay = false;
+Settings g_settings;
+std::wstring g_basePath;
+
+void Log(char const* text)
+{
+    std::wofstream out(g_basePath + L"ModernWoWRenderer.log", std::ios::app);
+    out << text << '\n';
+}
+
+int ReadInt(wchar_t const* key, int fallback)
+{
+    return GetPrivateProfileIntW(L"Atmosphere", key, fallback, (g_basePath + L"ModernWoWRenderer.ini").c_str());
+}
+
+float ReadFloat(wchar_t const* key, float fallback)
+{
+    wchar_t buffer[64]{};
+    GetPrivateProfileStringW(L"Atmosphere", key, L"", buffer, std::size(buffer), (g_basePath + L"ModernWoWRenderer.ini").c_str());
+    return buffer[0] ? static_cast<float>(wcstod(buffer, nullptr)) : fallback;
+}
+
+void ReloadSettings()
+{
+    g_settings.enabled = ReadInt(L"Enabled", 1) != 0;
+    g_settings.fogOpacity = static_cast<BYTE>(std::clamp(ReadInt(L"FogOpacity", 42), 0, 255));
+    g_settings.fogRed = static_cast<BYTE>(std::clamp(ReadInt(L"FogRed", 86), 0, 255));
+    g_settings.fogGreen = static_cast<BYTE>(std::clamp(ReadInt(L"FogGreen", 118), 0, 255));
+    g_settings.fogBlue = static_cast<BYTE>(std::clamp(ReadInt(L"FogBlue", 145), 0, 255));
+    g_settings.raysOpacity = static_cast<BYTE>(std::clamp(ReadInt(L"RaysOpacity", 36), 0, 255));
+    g_settings.fogHeight = std::clamp(ReadFloat(L"FogHeight", .58f), .0f, 1.0f);
+    g_settings.sunX = std::clamp(ReadFloat(L"SunX", .72f), .0f, 1.0f);
+    g_settings.sunY = std::clamp(ReadFloat(L"SunY", .18f), .0f, 1.0f);
+}
+
+void DrawQuad(IDirect3DDevice9* device, float left, float top, float right, float bottom, D3DCOLOR topColor, D3DCOLOR bottomColor)
+{
+    Vertex vertices[] = {{left, top, 0.f, 1.f, topColor}, {right, top, 0.f, 1.f, topColor}, {left, bottom, 0.f, 1.f, bottomColor}, {right, bottom, 0.f, 1.f, bottomColor}};
+    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, vertices, sizeof(Vertex));
+}
+
+void DrawAtmosphere(IDirect3DDevice9*)
+{
+    // Obsolete 2D screen quad completely disabled: volume rendering provides true 3D atmosphere.
+}
+
+HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
+{
+    if (!unified && (GetAsyncKeyState(VK_F10) & 1))
+        g_settings.enabled = !g_settings.enabled;
+    DrawAtmosphere(device);
+    g_drawingOverlay=true;
+    if(unified){if(graphicsShowStatus){watereffect::DrawStatus(device,graphicsActive?"FX ON":"FX OFF",0);
+        if(graphicsActive&&volume::enabled)watereffect::DrawStatus(device,volume::composed?"AIR ON":"AIR WAIT",1);}
+    }
+    else {watereffect::DrawStatus(device);
+    if(distancefog::enabled&&distancefog::showStatus)watereffect::DrawStatus(device,!distancefog::active?"HAZE OFF":distancefog::matches?"HAZE ON":"HAZE WAIT",1);}
+    tuningoverlay::Draw(device);
+    g_drawingOverlay=false;
+    return g_originalEndScene(device);
+}
+
+HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
+    waterreflection::Present();
+    volume::Present(d);
+    if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();Log("F7 overlay changed GraphicsEffects.ini");}
+    if(unified){
+        bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
+        if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
+            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=graphicsActive;
+            Log(graphicsActive?"F11 graphics ON":"F11 graphics OFF");
+        }
+        graphicsKeyDown=down;
+    }
+    {
+        bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();Log("F12 reloaded GraphicsEffects.ini");}
+        tuningKeyDown=down;
+    }
+    waterhighlight::Present();
+    watereffect::Present();
+    distancefog::Present();
+    waterdiag::Present(d); return originalPresent(d,a,b,w,r);
+}
+HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
+    waterreflection::Reset(d);
+    volume::Reset(d);
+    waterdiag::Reset(d); return originalReset(d,p);
+}
+HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
+    volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
+}
+HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
+    if(volume::internal)return originalDraw(d,t,start,n);
+    if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDraw(d,t,start,n);});
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitive",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    return originalDraw(d,t,start,n);
+}
+HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
+    if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    return originalDrawIndexed(d,t,base,min,vertices,start,n);
+}
+HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
+    if(volume::internal)return originalDrawUP(d,t,n,v,stride);
+    if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawUP(d,t,n,v,stride);});
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    return originalDrawUP(d,t,n,v,stride);
+}
+HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
+    if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)volume::ShadowDraw(d,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
+    if(!g_drawingOverlay)waterreflection::Prepare(d);
+    if(!g_drawingOverlay) waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
+    waterhighlight::Scope tint(d,g_drawingOverlay);
+    distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+}
+
+void HookDevice(IDirect3DDevice9* device)
+{
+    if (!device)
+        return;
+    std::lock_guard lock(g_hookMutex);
+    void** table = *reinterpret_cast<void***>(device);
+    if (g_hookedTable)
+    {
+        if (g_hookedTable != table)
+            Log("Different device implementation: leaving this device untouched.");
+        return;
+    }
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(&table[16], 69*sizeof(void*), PAGE_READWRITE, &oldProtect))
+        return;
+    g_originalEndScene = reinterpret_cast<EndSceneFn>(table[42]);
+    originalReset=reinterpret_cast<ResetFn>(table[16]);
+    originalPresent=reinterpret_cast<PresentFn>(table[17]);
+    originalDraw=reinterpret_cast<DrawFn>(table[81]);
+    originalDrawIndexed=reinterpret_cast<DrawIndexedFn>(table[82]);
+    originalDrawUP=reinterpret_cast<DrawUPFn>(table[83]);
+    originalDrawIndexedUP=reinterpret_cast<DrawIndexedUPFn>(table[84]);
+    InterlockedExchangePointer(&table[42], reinterpret_cast<void*>(HookedEndScene));
+    if(waterdiag::enabled || waterhighlight::enabled || watereffect::enabled || distancefog::enabled || volume::enabled || unified) {
+        InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
+        InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
+        InterlockedExchangePointer(&table[81],reinterpret_cast<void*>(HookedDraw));
+        InterlockedExchangePointer(&table[82],reinterpret_cast<void*>(HookedDrawIndexed));
+        InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
+        InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
+    }
+    if(volume::enabled){
+        volume::setDepth=reinterpret_cast<volume::SetDepthFn>(table[39]);
+        volume::getDepth=reinterpret_cast<volume::GetDepthFn>(table[40]);
+        originalClear=reinterpret_cast<ClearFn>(table[43]);
+        InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
+        InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
+        InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
+    }
+    DWORD ignored = 0;
+    VirtualProtect(&table[16], 69*sizeof(void*), oldProtect, &ignored);
+    g_hookedTable = table;
+    Log("D3D9 device hooked; see INI for atmosphere/diagnostics switches.");
+}
+
+class Direct3D9Proxy final : public IDirect3D9
+{
+public:
+    explicit Direct3D9Proxy(IDirect3D9* real) : _real(real) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** out) override
+    {
+        if (!out) return E_POINTER;
+        if (riid == __uuidof(IUnknown) || riid == __uuidof(IDirect3D9))
+        {
+            *out = static_cast<IDirect3D9*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++_refs; }
+    ULONG STDMETHODCALLTYPE Release() override { ULONG refs = --_refs; if (!refs) delete this; return refs; }
+    HRESULT STDMETHODCALLTYPE RegisterSoftwareDevice(void* init) override { return _real->RegisterSoftwareDevice(init); }
+    UINT STDMETHODCALLTYPE GetAdapterCount() override { return _real->GetAdapterCount(); }
+    HRESULT STDMETHODCALLTYPE GetAdapterIdentifier(UINT a, DWORD f, D3DADAPTER_IDENTIFIER9* id) override { return _real->GetAdapterIdentifier(a, f, id); }
+    UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT a, D3DFORMAT f) override { return _real->GetAdapterModeCount(a, f); }
+    HRESULT STDMETHODCALLTYPE EnumAdapterModes(UINT a, D3DFORMAT f, UINT m, D3DDISPLAYMODE* d) override { return _real->EnumAdapterModes(a, f, m, d); }
+    HRESULT STDMETHODCALLTYPE GetAdapterDisplayMode(UINT a, D3DDISPLAYMODE* d) override { return _real->GetAdapterDisplayMode(a, d); }
+    HRESULT STDMETHODCALLTYPE CheckDeviceType(UINT a, D3DDEVTYPE t, D3DFORMAT ad, D3DFORMAT bf, BOOL w) override { return _real->CheckDeviceType(a, t, ad, bf, w); }
+    HRESULT STDMETHODCALLTYPE CheckDeviceFormat(UINT a, D3DDEVTYPE t, D3DFORMAT af, DWORD u, D3DRESOURCETYPE r, D3DFORMAT c) override { return _real->CheckDeviceFormat(a, t, af, u, r, c); }
+    HRESULT STDMETHODCALLTYPE CheckDeviceMultiSampleType(UINT a, D3DDEVTYPE t, D3DFORMAT f, BOOL w, D3DMULTISAMPLE_TYPE m, DWORD* q) override { return _real->CheckDeviceMultiSampleType(a, t, f, w, m, q); }
+    HRESULT STDMETHODCALLTYPE CheckDepthStencilMatch(UINT a, D3DDEVTYPE t, D3DFORMAT af, D3DFORMAT rf, D3DFORMAT ds) override { return _real->CheckDepthStencilMatch(a, t, af, rf, ds); }
+    HRESULT STDMETHODCALLTYPE CheckDeviceFormatConversion(UINT a, D3DDEVTYPE t, D3DFORMAT s, D3DFORMAT d) override { return _real->CheckDeviceFormatConversion(a, t, s, d); }
+    HRESULT STDMETHODCALLTYPE GetDeviceCaps(UINT a, D3DDEVTYPE t, D3DCAPS9* c) override { return _real->GetDeviceCaps(a, t, c); }
+    HMONITOR STDMETHODCALLTYPE GetAdapterMonitor(UINT a) override { return _real->GetAdapterMonitor(a); }
+    HRESULT STDMETHODCALLTYPE CreateDevice(UINT a, D3DDEVTYPE t, HWND w, DWORD flags, D3DPRESENT_PARAMETERS* p, IDirect3DDevice9** device) override
+    {
+        HRESULT result = _real->CreateDevice(a, t, w, flags, p, device);
+        if (SUCCEEDED(result) && device && *device)
+            HookDevice(*device);
+        return result;
+    }
+private:
+    ~Direct3D9Proxy() { _real->Release(); }
+    IDirect3D9* _real;
+    std::atomic<ULONG> _refs{1};
+};
+void Initialize()
+{
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, path, std::size(path));
+    std::wstring exe(path);
+    g_basePath = exe.substr(0, exe.find_last_of(L"\\/") + 1);
+    wchar_t systemDirectory[MAX_PATH]{};
+    if (!GetSystemDirectoryW(systemDirectory, std::size(systemDirectory)))
+        return;
+    g_systemD3D9 = LoadLibraryW((std::wstring(systemDirectory) + L"\\d3d9.dll").c_str());
+    if (!g_systemD3D9)
+        return;
+    g_realCreate9 = reinterpret_cast<Direct3DCreate9Fn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9"));
+    g_realCreate9Ex = reinterpret_cast<Direct3DCreate9ExFn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9Ex"));
+    ReloadSettings();
+    waterdiag::Configure(g_basePath);
+    waterhighlight::Configure(g_basePath);
+    watereffect::Configure(g_basePath);
+    distancefog::Configure(g_basePath);
+    volume::Configure(g_basePath);
+    waterreflection::Configure(g_basePath);
+    tuningoverlay::Configure(g_basePath);
+    unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
+    if(unified){watereffect::hotkey=false;distancefog::hotkey=false;g_settings.enabled=false;
+        graphicsShowStatus=GetPrivateProfileIntW(L"Graphics",L"ShowStatus",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
+        graphicsActive=GetPrivateProfileIntW(L"Graphics",L"Enabled",1,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
+        watereffect::active=distancefog::active=volume::active=graphicsActive;
+    }
+    Log("Modern WoW Renderer proxy loaded.");
+    // Device vtable entries remain hooked for the process lifetime.
+    HMODULE pinned = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&Initialize), &pinned);
+}
+}
+
+extern "C" IDirect3D9* WINAPI Direct3DCreate9(UINT sdkVersion)
+{
+    std::call_once(g_initialize, Initialize);
+    if (!g_realCreate9) return nullptr;
+    IDirect3D9* real = g_realCreate9(sdkVersion);
+    return real ? new Direct3D9Proxy(real) : nullptr;
+}
+
+extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT sdkVersion, IDirect3D9Ex** out)
+{
+    std::call_once(g_initialize, Initialize);
+    Log("Direct3D9Ex requested: passthrough only, effects unavailable.");
+    return g_realCreate9Ex ? g_realCreate9Ex(sdkVersion, out) : D3DERR_NOTAVAILABLE;
+}
+
+BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID)
+{
+    return TRUE;
+}

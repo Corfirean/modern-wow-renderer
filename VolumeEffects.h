@@ -1,0 +1,251 @@
+#pragma once
+// Shared shader for the isolated test and opt-in game integration.
+// Height fog is integrated along the view ray. Shafts are SCREEN-SPACE visibility,
+// not 3D shadow-map ray marching: off-screen occluders are not represented.
+inline const char* volumePixelSource=R"HLSL(
+sampler2D scene:register(s0);
+sampler2D depthMap:register(s1);
+sampler2D noiseMap:register(s2);
+// x=projection A,y=projection B,z=projection scale X,w=scale Y
+float4 projection:register(c0);
+// x=base height,y=height falloff,z=density,w=max march distance
+float4 medium:register(c1);
+// xy=screen sun position,z=shaft strength,w=depth viewport maximum
+float4 sun:register(c2);
+float4 fogColor:register(c3);
+float4 inverseView[4]:register(c4);
+// x=0 linear depth debug, 1 height fog, 2 fog+screen-space shafts, 3 atmospheric composite
+float4 mode:register(c8);
+// x=time,y=world noise scale,z=variation,w=low-layer strength
+float4 detail:register(c9);
+// xyz=view-space direction toward the light
+float4 lightDirection:register(c10);
+float4 directColor:register(c11);
+// xy=1/render size,z=softness in pixels,w=radial falloff
+float4 rayTuning:register(c12);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float raw=tex2D(depthMap,uv).r;
+    float z=raw>=.9999 ? medium.w : projection.y/(raw/max(sun.w,.001)-projection.x);
+    z=clamp(z,0,medium.w);
+    if(mode.x<.5)return float4(z/medium.w,z/medium.w,z/medium.w,1);
+    if(mode.x>5.5) {
+        float clearThreshold=lerp(.9995,.955,step(sun.w,.99));
+        float openness=smoothstep(clearThreshold,1,raw);
+        float3 skyColor=tex2D(scene,uv).rgb;
+        float skyLuminance=dot(skyColor,float3(.2126,.7152,.0722));
+        float sourceThreshold=clamp(mode.w, 0.40, 0.85);
+        float sunDist=length(uv-sun.xy);
+        float sunMask=(sun.x<-.5) ? 0.0 : saturate(1.0 - sunDist*3.2);
+        float visibleSun=saturate((skyLuminance-sourceThreshold)/max(1-sourceThreshold,.01)) * sunMask;
+        float sunHalo=(sun.x<-.5) ? 0.0 : exp(-sunDist*14.0)*mode.y*1.2;
+        // Rays emanate strictly from the bright celestial disc in the sky, softly expanded by sunHalo.
+        // If there is no real bright sun disc in the sky (visibleSun == 0), amount is ZERO.
+        // This physically guarantees no phantom spots behind buildings, trees or in empty sky!
+        float amount=openness * visibleSun * (1.2 + sunHalo) * sun.z * 0.55;
+        if(mode.x>6.5)return float4(amount,amount,amount,1);
+        float3 color=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.35,.75);
+        return float4(color*amount,1);
+    }
+    float3 viewEnd=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*z;
+    float3 origin=inverseView[3].xyz;
+    float3 delta=viewEnd.x*inverseView[0].xyz+viewEnd.y*inverseView[1].xyz+viewEnd.z*inverseView[2].xyz;
+    float rayLen=length(delta);
+
+    // Analytic exponential height fog integral - continuous without horizon discontinuities
+    float hCam=origin.z-medium.x;
+    float dz=delta.z;
+    float u=clamp(medium.y*dz,-12.0,12.0);
+    float factor=(abs(u)<0.02) ? (1.0-0.5*u+(1.0/6.0)*u*u) : ((1.0-exp(-u))/u);
+    float eCam=exp(-clamp(hCam*medium.y,-8.0,8.0));
+    float optDepth=medium.z*rayLen*eCam*factor;
+    optDepth=max(optDepth,0.0);
+
+    // Atmospheric rolling noise modulation
+    float2 wind=float2(detail.x*.0021,-detail.x*.0013);
+    float3 hitPos=origin+delta;
+    float broad=tex2Dlod(noiseMap,float4(hitPos.xy*detail.y*.32+wind*.22,0,0)).r;
+    float cloud=smoothstep(.25,.75,broad);
+    optDepth*=lerp(.75,1.25,cloud*detail.z);
+
+    float transmission=exp(-clamp(optDepth,0.0,12.0));
+    float isSky=step(.9995,raw);
+    float distFog=1.0-exp(-min(z,medium.w)*medium.z*0.06);
+    float fogAmount=max(1.0-transmission,distFog*0.35);
+    // Smooth transition into sky distance fog rather than a hard cut
+    fogAmount=lerp(fogAmount,distFog*0.15,isSky);
+
+    float3 rayDir=normalize(viewEnd);
+    float cosAngle=dot(rayDir,normalize(lightDirection.xyz));
+    float miePhase=pow(saturate(cosAngle*0.5+0.5),6.0);
+    float3 scattering=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.45,miePhase*.72);
+    float shaftAmount=sun.z*(.35+1.0*fogAmount)*(.40+.60*miePhase);
+    if(mode.x>4.5||mode.z>.5)return float4(fogAmount,fogAmount,fogAmount,1);
+    if(mode.x>2.5)return float4(scattering,fogAmount*saturate(mode.y*1.5));
+    float4 base=tex2D(scene,uv);
+    float3 fogged=base.rgb*transmission+lerp(base.rgb,fogColor.rgb*.82,mode.y)*fogAmount;
+    return float4(fogged+scattering*shaftAmount*.4,base.a);
+}
+)HLSL";
+
+// The shafts are generated at half resolution and softened in two separable
+// passes.  Linear sampling plus a nine-tap Gaussian removes the pixel-grid
+// stair steps without blurring the underlying world or UI.
+inline const char* volumeBlurPixelSource=R"HLSL(
+sampler2D image:register(s0);
+// xy = one blur step in UV space
+float4 blurStep:register(c0);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float4 c=tex2D(image,uv)*.227027;
+    c+=(tex2D(image,uv+blurStep.xy*1.384615)+tex2D(image,uv-blurStep.xy*1.384615))*.158108;
+    c+=(tex2D(image,uv+blurStep.xy*3.230769)+tex2D(image,uv-blurStep.xy*3.230769))*.113546;
+    return c;
+}
+)HLSL";
+
+inline const char* volumeCopyPixelSource=R"HLSL(
+sampler2D image:register(s0);
+float4 main(float2 uv:TEXCOORD0):COLOR0 { return tex2D(image,uv); }
+)HLSL";
+
+// Reprojects no geometry, so history is aggressively clipped to the current
+// four-neighbour envelope. This keeps shafts calm under foliage without the
+// long camera-motion trails of an unconstrained temporal average.
+inline const char* volumeTemporalPixelSource=R"HLSL(
+sampler2D currentFrame:register(s0);
+sampler2D historyFrame:register(s1);
+// xy=one texel, z=history weight, w=history valid
+float4 temporal:register(c0);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float4 c=tex2D(currentFrame,uv);
+    if(temporal.w<.5)return c;
+    float4 a=tex2D(currentFrame,uv+float2(temporal.x,0));
+    float4 b=tex2D(currentFrame,uv-float2(temporal.x,0));
+    float4 d=tex2D(currentFrame,uv+float2(0,temporal.y));
+    float4 e=tex2D(currentFrame,uv-float2(0,temporal.y));
+    float4 lo=min(c,min(min(a,b),min(d,e)));
+    float4 hi=max(c,max(max(a,b),max(d,e)));
+    float4 h=clamp(tex2D(historyFrame,uv),lo,hi);
+    return lerp(c,h,temporal.z);
+}
+)HLSL";
+
+// Depth-derived contact and directional shadows.
+// Screen-space: AO from depth discontinuities + directional ray march along light direction.
+// No light-space shadowmap required -- works everywhere including off-screen casters.
+inline const char* contactShadowPixelSource=R"HLSL(
+sampler2D depthMap:register(s0);
+// xy=1/full render size, z=strength, w=radius in full-resolution pixels
+float4 tuning:register(c0);
+// x=projection A, y=projection B, z=viewport depth maximum
+float4 projection:register(c1);
+float linearZ(float raw) {
+    return raw>=.9999 ? 100000 : projection.y/(raw/max(projection.z,.001)-projection.x);
+}
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float raw=tex2D(depthMap,uv).r;
+    float center=linearZ(raw);
+    if(center>99999)return 1;
+    const float2 dirs[8]={float2(1,0),float2(-1,0),float2(0,1),float2(0,-1),
+                          float2(.707,.707),float2(-.707,.707),float2(.707,-.707),float2(-.707,-.707)};
+    float occlusion=0,weightSum=0;
+    [unroll] for(int ring=1;ring<=2;++ring) [unroll] for(int i=0;i<8;++i) {
+        float radius=tuning.w*(ring*.5);
+        float2 q=uv+dirs[i]*tuning.xy*radius;
+        float neighbor=linearZ(tex2Dlod(depthMap,float4(q,0,0)).r);
+        float delta=center-neighbor;
+        float bias=.025+center*.0008;
+        float range=.65+center*.018+radius*.025;
+        float nearBlocker=saturate((delta-bias)/max(range*.28,.02))*saturate(1-delta/max(range,1e-3));
+        float weight=ring==1?1:.55;
+        occlusion+=nearBlocker*weight;weightSum+=weight;
+    }
+    occlusion=pow(saturate(occlusion/max(weightSum,.001)),.72);
+    float distanceFade=saturate(1-center/260.0);
+    float shade=1-tuning.z*occlusion*distanceFade;
+    return float4(shade,shade,shade,1);
+}
+)HLSL";
+
+inline const char* rayCompositePixelSource=R"HLSL(
+sampler2D rays:register(s0);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float4 ray=tex2D(rays,uv);
+    return ray;
+}
+)HLSL";
+
+inline const char* solarRadialPixelSource=R"HLSL(
+sampler2D sourceMask:register(s0);
+// xy=sun position, z=total ray reach, w=per-sample decay
+float4 radial:register(c0);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float2 stepUv=(radial.xy-uv)*(radial.z/32.0);
+    float illumination=1;
+    float weightSum=0;
+    float4 light=0;
+    float2 q=uv;
+    [unroll] for(int i=0;i<32;++i) {
+        q+=stepUv;
+        float weight=illumination;
+        light+=tex2D(sourceMask,q)*weight;
+        weightSum+=weight;
+        illumination*=radial.w;
+    }
+    light.rgb=light.rgb/max(weightSum,.001)*1.1;
+    light.a=1;
+    return light;
+}
+)HLSL";
+
+inline const char* localLightPixelSource=R"HLSL(
+sampler2D scene:register(s0);
+sampler2D depthMap:register(s1);
+float4 localTuning:register(c0);
+float4 localMode:register(c1);
+float4 depthInfo:register(c2);
+float3 sourceAt(float2 uv) {
+    float3 c=tex2D(scene,uv).rgb;
+    float peak=max(c.r,max(c.g,c.b));
+    float bright=saturate((peak-localTuning.w)/max(1-localTuning.w,.01));
+    float warm=smoothstep(.010,.11,c.r-c.g)*smoothstep(.025,.20,c.g-c.b);
+    float blueShoulder=smoothstep(.001,.025,c.b);
+    float amberRatio=1-smoothstep(.90,.98,c.g/max(c.r,.01));
+    float raw=tex2D(depthMap,uv).r;
+    float clearThreshold=lerp(.9995,.955,step(depthInfo.x,.99));
+    float worldGeometry=1-smoothstep(clearThreshold,1,raw);
+    return c*bright*warm*blueShoulder*amberRatio*worldGeometry;
+}
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float3 raw=tex2D(scene,uv).rgb;
+    float rawPeak=max(raw.r,max(raw.g,raw.b));
+    float rawBright=saturate((rawPeak-localTuning.w)/max(1-localTuning.w,.01));
+    float3 glow=(localMode.x>.5?float3(rawBright,0,0):sourceAt(uv))*localTuning.z*24.0;
+    return float4(glow,1);
+}
+)HLSL";
+
+inline const char* postProcessPixelSource=R"HLSL(
+sampler2D scene:register(s0);
+// x=brightness, y=contrast, z=gamma, w=sharpness
+float4 postParams:register(c0);
+// xy=1/renderWidth, 1/renderHeight
+float4 renderSize:register(c1);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float4 c=tex2D(scene,uv);
+    float3 col=c.rgb;
+    if(postParams.w>.005) {
+        float2 off=renderSize.xy;
+        float3 up=tex2D(scene,uv+float2(0,-off.y)).rgb;
+        float3 down=tex2D(scene,uv+float2(0,off.y)).rgb;
+        float3 left=tex2D(scene,uv+float2(-off.x,0)).rgb;
+        float3 right=tex2D(scene,uv+float2(off.x,0)).rgb;
+        float3 lap=col*4.0-(up+down+left+right);
+        col=saturate(col+lap*(postParams.w*.75));
+    }
+    col=col+postParams.x;
+    col=(col-.5)*postParams.y+.5;
+    col=pow(max(col,0.0),1.0/max(postParams.z,.01));
+    return float4(saturate(col),c.a);
+}
+)HLSL";
+

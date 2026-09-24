@@ -1,0 +1,64 @@
+#pragma once
+namespace waterreflection {
+using Microsoft::WRL::ComPtr;
+struct Resources{
+    ComPtr<IDirect3DTexture9> scene;
+    ComPtr<IDirect3DSurface9> surface;
+    UINT width=0, height=0;
+    IDirect3DDevice9* owner=nullptr;
+};
+inline Resources& resources=*new Resources;
+inline bool ready=false;
+inline unsigned copiedFrames=0,failedFrames=0;
+inline std::wstring logPath;
+
+inline void Configure(const std::wstring& base){logPath=base+L"WaterReflection.log";}
+inline void ClearInput(){watereffect::reflectionScene=nullptr;watereffect::reflectionDepth=nullptr;memset(watereffect::reflectionData,0,sizeof(watereffect::reflectionData));}
+
+inline bool IsWater(IDirect3DDevice9* d){
+ ComPtr<IDirect3DPixelShader9> ps;ComPtr<IDirect3DVertexShader9> vs;
+ if(FAILED(d->GetPixelShader(ps.GetAddressOf()))||FAILED(d->GetVertexShader(vs.GetAddressOf()))||!ps||!vs)return false;
+ auto psHash=volume::Hash(ps.Get());
+ auto vsHash=volume::Hash(vs.Get());
+ return (psHash==0x17f042a7906ca126ull||psHash==0x7d4f078fa1876a09ull)&&
+        (vsHash==0x206d861fd0a721ddull||vsHash==0xfdd9528ed3ac30eaull);
+}
+
+inline void Expose(){
+ if(!ready||!resources.scene)return;
+ watereffect::reflectionScene=resources.scene.Get();
+ watereffect::reflectionDepth=volume::depth.Get();
+ memcpy(watereffect::reflectionData,volume::constants[0],sizeof(float)*4);
+ watereffect::reflectionData[5]=1.f/float(std::max<UINT>(resources.width,1));
+ watereffect::reflectionData[6]=1.f/float(std::max<UINT>(resources.height,1));
+ watereffect::reflectionData[7]=volume::constants[2][3];
+}
+
+inline void Prepare(IDirect3DDevice9* d){
+ if(!watereffect::enabled||!watereffect::active||volume::internal||!IsWater(d))return;
+ if(ready){Expose();return;}
+ if(volume::owner!=d||!volume::ready||!volume::target||!volume::depth)return;
+ D3DSURFACE_DESC desc{};
+ if(FAILED(volume::target->GetDesc(&desc))||desc.MultiSampleType!=D3DMULTISAMPLE_NONE){++failedFrames;return;}
+ if(resources.owner!=d||resources.width!=desc.Width||resources.height!=desc.Height||!resources.scene||!resources.surface){
+     resources.scene.Reset();
+     resources.surface.Reset();
+     resources.owner=d;
+     resources.width=desc.Width;
+     resources.height=desc.Height;
+     if(FAILED(d->CreateTexture(desc.Width,desc.Height,1,D3DUSAGE_RENDERTARGET,desc.Format,D3DPOOL_DEFAULT,resources.scene.GetAddressOf(),nullptr))||
+        FAILED(resources.scene->GetSurfaceLevel(0,resources.surface.GetAddressOf()))){
+         ++failedFrames;return;
+     }
+ }
+ if(FAILED(d->StretchRect(volume::target.Get(),nullptr,resources.surface.Get(),nullptr,D3DTEXF_NONE))){
+     ++failedFrames;return;
+ }
+ ready=true;++copiedFrames;Expose();
+ if(copiedFrames==1)std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR source captured before first confirmed water draw "<<desc.Width<<'x'<<desc.Height<<'\n';
+}
+
+inline void Finish(){ClearInput();ready=false;}
+inline void Reset(IDirect3DDevice9* d){Finish();resources.surface.Reset();resources.scene.Reset();resources.owner=nullptr;resources.width=resources.height=0;}
+inline void Present(){if((copiedFrames+failedFrames)%600==120)std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"copied="<<copiedFrames<<" failed="<<failedFrames<<'\n';Finish();}
+}
