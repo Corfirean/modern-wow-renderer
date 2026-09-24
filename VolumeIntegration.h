@@ -8,6 +8,7 @@
 #include "src/D3D9/DepthCapture.h"
 #include "src/D3D9/CameraCapture.h"
 #include "src/Scene/DrawCallClassifier.h"
+#include "src/Effects/DirectionalVolumetricLighting.h"
 namespace volume {
 using Microsoft::WRL::ComPtr;
 using SetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9*);
@@ -15,6 +16,9 @@ using GetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9**);
 SetDepthFn setDepth=nullptr; GetDepthFn getDepth=nullptr;
 bool enabled=false,active=true,ready=false,composed=false,internal=false;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,cloudShadowsEffectEnabled=true,temporalShaftsEnabled=false;
+bool sunGlareEnabled=true;
+float sunGlareStrength=0.25f;
+std::wstring savedBasePath;
 IDirect3DDevice9* owner=nullptr;
 // Do not release D3D resources from DLL static destructors under the loader lock
 // when a process exits mid-frame. Finish releases them during normal operation;
@@ -72,13 +76,18 @@ void ReloadTuning(){
   contrastPercent=std::clamp(ReadTuning(L"ContrastPercent",100,L"PostProcess"),50,180);
   gammaPercent=std::clamp(ReadTuning(L"GammaPercent",100,L"PostProcess"),50,180);
   sharpnessPercent=std::clamp(ReadTuning(L"SharpnessPercent",35,L"PostProcess"),0,100);
-  sunGlowPercent=std::clamp(ReadTuning(L"SunGlowPercent",80),0,300);
+ sunGlowPercent=std::clamp(ReadTuning(L"SunGlowPercent",80),0,300);
+ sunGlareEnabled=ReadTuning(L"SunGlareEnabled",1)!=0;
+ sunGlareStrength=float(ReadTuning(L"SunGlareStrengthPercent",25))*0.01f;
+ if(!savedBasePath.empty()){renderer::DirectionalVolumetricLighting::Instance().Configure(savedBasePath);}
  shaftDebug=ReadTuning(L"ShaftDebugMask",0)!=0;
  localLightDebug=ReadTuning(L"LocalLightDebugMask",0)!=0;
   if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning shaft="<<strength<<" moon="<<moonStrength<<" softness="<<raySoftness<<" falloff="<<rayFalloff<<" sunThreshold="<<sunSourceThreshold<<" local="<<localLightStrength<<" threshold="<<localLightThreshold<<" localRadius="<<localLightRadius<<" density="<<density<<" fogWash="<<fogWash<<" baseHeight="<<baseHeight<<" variation="<<variation<<" lowLayer="<<lowLayer<<" contact="<<contactShadowStrength<<','<<contactShadowRadius<<" shadowmap="<<shadowMapEnabled<<','<<directionalShadowStrength<<','<<configuredShadowMapSize<<','<<shadowMapDistance<<','<<shadowMapBias<<" cloud="<<cloudShadowStrength<<" sunYScale="<<sunVerticalScale<<" offset="<<sunOffsetX<<','<<sunOffsetY<<" debug="<<shaftDebug<<" localDebug="<<localLightDebug<<" bright="<<brightnessPercent<<" contrast="<<contrastPercent<<" gamma="<<gammaPercent<<" sharp="<<sharpnessPercent<<'\n';}
 }
 void Configure(const std::wstring& base){
+ savedBasePath=base;
  mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";logPath=base+L"VolumeEffects.log";
+ renderer::DirectionalVolumetricLighting::Instance().Configure(base);
  enabled=GetPrivateProfileIntW(L"Volume",L"Enabled",0,mainIni.c_str())!=0;ReloadTuning();
  if(!enabled)return;
  ComPtr<ID3DBlob> errors;
@@ -106,6 +115,7 @@ void Reset(IDirect3DDevice9* d){
  renderer::CameraCapture::Instance().Reset();
  renderer::ShaderCache::Instance().Clear();
  renderer::DrawCallClassifier::Instance().ClearCache();
+ renderer::DirectionalVolumetricLighting::Instance().Reset(d);
  resources.rayHistorySurface.Reset();resources.rayHistory.Reset();resources.historyOwner=nullptr;resources.historyWidth=resources.historyHeight=0;resources.historyValid=false;resources.shadowDepthSurface.Reset();resources.shadowColorSurface.Reset();resources.shadowDepth.Reset();resources.shadowColor.Reset();resources.shadowOwner=nullptr;resources.shadowSize=0;shadowFrameStarted=shadowFrameValid=false;stableShadowLightValid=false;shadowCacheValid=shadowAnchorValid=false;
 }
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d,IDirect3DSurface9* s){
@@ -171,7 +181,7 @@ bool CaptureCamera(IDirect3DDevice9* d){
  cfg.raySoftness = raySoftness;
  cfg.rayFalloff = rayFalloff;
 
- renderer::FrameContext frameCtx;
+ renderer::FrameContext& frameCtx = renderer::FrameContext::Current();
  bool ok = renderer::CameraCapture::Instance().Capture(
      d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
  if(ok){
@@ -180,6 +190,11 @@ bool CaptureCamera(IDirect3DDevice9* d){
   celestialShadowLight = frameCtx.shadowLightFactor;
   smoothSunX = frameCtx.sunScreenX;
   smoothSunY = frameCtx.sunScreenY;
+  frameCtx.depthTexture = resources.depth.Get();
+  frameCtx.depthSurface = resources.surface.Get();
+  frameCtx.depthAvailable = (resources.depth != nullptr);
+  frameCtx.sceneColor = resources.scene.Get();
+  frameCtx.sceneSurface = resources.sceneSurface.Get();
   static unsigned logged=0;if(logged++<32||frames%180==0){
    char hashHex[24];sprintf_s(hashHex,"0x%016llX",static_cast<unsigned long long>(cameraCaptureShaderHash));
    std::ofstream out(std::filesystem::path(logPath),std::ios::app);
@@ -242,6 +257,15 @@ void BuildShadowCamera(){
                           {constants[6][0],constants[6][1],constants[6][2],0},
                           {constants[7][0],constants[7][1],constants[7][2],1}};
  for(int column=0;column<4;++column)for(int row=0;row<4;++row){viewToShadowMatrix[column][row]=0;for(int k=0;k<4;++k)viewToShadowMatrix[column][row]+=shadowMatrix[k][row]*inverseView[column][k];}
+ auto& ctx = renderer::FrameContext::Current();
+ for(int col=0;col<4;++col)for(int r=0;r<4;++r){
+  ctx.shadowMatrix.m[col][r] = shadowMatrix[col][r];
+  ctx.viewToShadowMatrix.m[col][r] = viewToShadowMatrix[col][r];
+ }
+ ctx.shadowTexture = resources.shadowDepth.Get();
+ ctx.shadowMapValid = true;
+ ctx.shadowMapSize = configuredShadowMapSize;
+ ctx.shadowMapDistance = shadowMapDistance;
 }
 template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d,DrawCall&& draw){
  if(!enabled||!active||internal||!ready||!shadowsEffectEnabled||!shadowMapEnabled||directionalShadowStrength<=0||owner!=d)return;
@@ -378,13 +402,16 @@ bool Composite(IDirect3DDevice9* d){
    if(ok)drawQuad(desc.Width,desc.Height);
   }
   trace("composite:first fog drawn");
-  if(shaftsEffectEnabled&&(constants[2][2]>0.001f||shaftDebug)){
+  // True world-space Directional Volumetric Lighting
+  renderer::DirectionalVolumetricLighting::Instance().Render(d, renderer::FrameContext::Current(), target.Get());
+  trace("composite:first directional volumetrics rendered");
+  if(sunGlareEnabled&&shaftsEffectEnabled&&(constants[2][2]>0.001f||shaftDebug)){
  // First generate only a continuous sky/occlusion source mask. INTZ is point
  // sampled here once; all beam construction below uses a linearly filtered
  // colour target, avoiding the repeated dotted depth pattern.
  check(d->SetRenderTarget(0,resources.rayASurface.Get()));D3DVIEWPORT9 rayVp{0,0,rayWidth,rayHeight,0,1};check(d->SetViewport(&rayVp));
  check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0,1,0));check(d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE));check(d->SetPixelShader(shader.Get()));check(d->SetTexture(0,resources.scene.Get()));check(d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_LINEAR));check(d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR));check(d->SetPixelShaderConstantF(0,constants[0],13));
- float shaftMode[4]={shaftDebug?7.f:6.f,float(sunGlowPercent)*0.01f,shaftDebug?1.f:0.f,sunSourceThreshold};check(d->SetPixelShaderConstantF(8,shaftMode,1));if(ok)drawQuad(rayWidth,rayHeight);
+ float shaftMode[4]={shaftDebug?7.f:6.f,float(sunGlowPercent)*0.01f*sunGlareStrength,shaftDebug?1.f:0.f,sunSourceThreshold};check(d->SetPixelShaderConstantF(8,shaftMode,1));if(ok)drawQuad(rayWidth,rayHeight);
  trace("composite:first solar source drawn");
  // True radial blur: transport the source mask continuously toward the sun.
  check(d->SetTexture(1,nullptr));check(d->SetTexture(2,nullptr));check(d->SetPixelShader(radialShader.Get()));check(d->SetTexture(0,resources.rayA.Get()));

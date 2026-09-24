@@ -19,6 +19,7 @@
     <ClCompile Include="src\Scene\DrawCallClassifier.cpp" />
     <ClCompile Include="src\D3D9\DepthCapture.cpp" />
     <ClCompile Include="src\D3D9\CameraCapture.cpp" />
+    <ClCompile Include="src\Effects\DirectionalVolumetricLighting.cpp" />
     <ClInclude Include="src\Core\MathTypes.h" />
     <ClInclude Include="src\Core\FrameContext.h" />
     <ClInclude Include="src\Core\ShaderCache.h" />
@@ -28,6 +29,7 @@
     <ClInclude Include="src\Diagnostics\RendererDiagnostics.h" />
     <ClInclude Include="src\D3D9\DepthCapture.h" />
     <ClInclude Include="src\D3D9\CameraCapture.h" />
+    <ClInclude Include="src\Effects\DirectionalVolumetricLighting.h" />
     <None Include="d3d9.def" />
     <None Include="ModernWoWRenderer.ini" />
     <None Include="GraphicsEffects.ini" />

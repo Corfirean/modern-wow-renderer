@@ -7,6 +7,8 @@ namespace renderer
 {
     struct FrameContext
     {
+        static FrameContext& Current();
+
         uint64_t frameIndex = 0;
         IDirect3DDevice9* device = nullptr;
 
@@ -33,6 +35,18 @@ namespace renderer
         float sunScreenX = -1.0f;
         float sunScreenY = -1.0f;
         float sunStrength = 0.0f;
+
+        // Projection reconstruction parameters [P22, P32, P00, P11]
+        float projUnpack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float depthMaxZ = 1.0f;
+
+        // Directional shadow map data
+        Matrix4 shadowMatrix;
+        Matrix4 viewToShadowMatrix;
+        IDirect3DTexture9* shadowTexture = nullptr;
+        bool shadowMapValid = false;
+        uint32_t shadowMapSize = 2048;
+        float shadowMapDistance = 180.0f;
 
         IDirect3DTexture9* depthTexture = nullptr;
         IDirect3DSurface9* depthSurface = nullptr;

@@ -196,6 +196,37 @@ namespace renderer
         frameContext.height = vp.Height;
         frameContext.cameraValid = true;
 
+        frameContext.projUnpack[0] = outConstants[0][0]; // P22
+        frameContext.projUnpack[1] = outConstants[0][1]; // P32
+        frameContext.projUnpack[2] = outConstants[0][2]; // P00
+        frameContext.projUnpack[3] = outConstants[0][3]; // P11
+        frameContext.depthMaxZ = vp.MaxZ;
+
+        // Inverse view rotation and translation
+        frameContext.inverseView.m[0][0] = outConstants[4][0]; frameContext.inverseView.m[0][1] = outConstants[4][1]; frameContext.inverseView.m[0][2] = outConstants[4][2]; frameContext.inverseView.m[0][3] = 0.0f;
+        frameContext.inverseView.m[1][0] = outConstants[5][0]; frameContext.inverseView.m[1][1] = outConstants[5][1]; frameContext.inverseView.m[1][2] = outConstants[5][2]; frameContext.inverseView.m[1][3] = 0.0f;
+        frameContext.inverseView.m[2][0] = outConstants[6][0]; frameContext.inverseView.m[2][1] = outConstants[6][1]; frameContext.inverseView.m[2][2] = outConstants[6][2]; frameContext.inverseView.m[2][3] = 0.0f;
+        frameContext.inverseView.m[3][0] = outConstants[7][0]; frameContext.inverseView.m[3][1] = outConstants[7][1]; frameContext.inverseView.m[3][2] = outConstants[7][2]; frameContext.inverseView.m[3][3] = 1.0f;
+
+        // World-space sun direction: transform lightView by inverse view rotation
+        Vec3 invX{ outConstants[4][0], outConstants[4][1], outConstants[4][2] };
+        Vec3 invY{ outConstants[5][0], outConstants[5][1], outConstants[5][2] };
+        Vec3 invZ{ outConstants[6][0], outConstants[6][1], outConstants[6][2] };
+        Vec3 lightView{ outConstants[10][0], outConstants[10][1], outConstants[10][2] };
+        Vec3 sunWorld = {
+            invX.x * lightView.x + invY.x * lightView.y + invZ.x * lightView.z,
+            invX.y * lightView.x + invY.y * lightView.y + invZ.y * lightView.z,
+            invX.z * lightView.x + invY.z * lightView.y + invZ.z * lightView.z
+        };
+        float swLen = sqrtf(sunWorld.x * sunWorld.x + sunWorld.y * sunWorld.y + sunWorld.z * sunWorld.z);
+        if (swLen > 1e-4f) {
+            sunWorld.x /= swLen; sunWorld.y /= swLen; sunWorld.z /= swLen;
+        }
+        if (sunWorld.z < 0.04f) sunWorld.z = 0.04f;
+        swLen = sqrtf(sunWorld.x * sunWorld.x + sunWorld.y * sunWorld.y + sunWorld.z * sunWorld.z);
+        sunWorld.x /= swLen; sunWorld.y /= swLen; sunWorld.z /= swLen;
+        frameContext.sunDirectionWorld = sunWorld;
+
         m_valid = true;
         ++m_capturedFrames;
         return true;

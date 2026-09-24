@@ -2,6 +2,12 @@
 
 namespace renderer
 {
+    FrameContext& FrameContext::Current()
+    {
+        static FrameContext s_current;
+        return s_current;
+    }
+
     void FrameContext::ResetForNewFrame(uint64_t newFrameIndex, IDirect3DDevice9* dev)
     {
         frameIndex = newFrameIndex;
@@ -28,6 +34,16 @@ namespace renderer
         sunScreenX = -1.0f;
         sunScreenY = -1.0f;
         sunStrength = 0.0f;
+
+        projUnpack[0] = projUnpack[1] = projUnpack[2] = projUnpack[3] = 0.0f;
+        depthMaxZ = 1.0f;
+
+        shadowMatrix.SetIdentity();
+        viewToShadowMatrix.SetIdentity();
+        shadowTexture = nullptr;
+        shadowMapValid = false;
+        shadowMapSize = 2048;
+        shadowMapDistance = 180.0f;
 
         depthTexture = nullptr;
         depthSurface = nullptr;
