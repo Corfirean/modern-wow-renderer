@@ -27,9 +27,9 @@ namespace renderer
         float extinction = 0.8f;
         float anisotropyG = 0.72f;
         float maxDistance = 220.0f;
-        uint32_t sampleCount = 8;            // Default 8 samples
+        uint32_t sampleCount = 4;            // Compatibility default: 4 samples
         uint32_t skySampleCount = 6;         // Default 6 samples for sky
-        float resolutionPercent = 25.0f;     // Default 25% = quarter-res
+        float resolutionPercent = 12.0f;     // Compatibility default: 12% low-res buffer
         bool temporalEnabled = true;
         float temporalBlend = 0.80f;
         bool shadowEnabled = true;

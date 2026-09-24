@@ -108,8 +108,10 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float3 a=noiseGradient(warped+drift);
     float3 b=noiseGradient(float2(warped.x*.8+warped.y*.6,-warped.x*.6+warped.y*.8)*1.83-drift*.67+17.2);
     float2 longSlopes=swell.yz+float2(-swellCross.z,swellCross.y)*.72;
-    float2 slopes=(a.yz+float2(.8*b.y-.6*b.z,.6*b.y+.8*b.z)*.32)*.35+
-                  longSlopes*foreverStyle.x*1.2;
+    // Keep the pre-refactor wave energy: the reduced slope made every later
+    // effect (normal lighting, refraction, SSR and foam) nearly flat.
+    float2 slopes=(a.yz+float2(.8*b.y-.6*b.z,.6*b.y+.8*b.z)*.43)*.72+
+                  longSlopes*foreverStyle.x;
     float filter=rsqrt(1+16*dot(fwidth(p),fwidth(p)));
     slopes*=filter;
     float2 offset=slopes*controls.y;
@@ -141,7 +143,7 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float waterDepth=abs(behindZ-viewPos.z);
     float captureValid=reflectionStyle.w;
     float depthValid=captureValid*step(behindZ,99999);
-    float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*(25+waterStyle.x*220);
+    float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*(15+waterStyle.x*120);
     float2 refractUV=screenUV+(depthValid?refractOffset:float2(0,0));
     float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
     float shallow=saturate(waterDepth/max(waterStyle.w,1e-3));
@@ -153,19 +155,19 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float3 l=safeNormalize(-lightDirection.xyz);
     float ndh=saturate(dot(wave,safeNormalize(l+v)));
     float ndl=saturate(dot(wave,l));
-    float broad=pow(ndh,18);
-    float sparkle=pow(ndh,120);
-    float glitterVariation=.35+1.2*pow(saturate(a.x*.52+b.x*.31+swell.x*.17),3);
+    float broad=pow(ndh,14);
+    float sparkle=pow(ndh,112);
+    float glitterVariation=.28+1.45*pow(saturate(a.x*.52+b.x*.31+swell.x*.17),3);
     float foreverFresnel=pow(1-saturate(dot(wave,v)),2);
     float fresnel=saturate(.08+foreverStyle.z*(.10+.62*foreverFresnel));
-    float pathBreakup=.35+1.10*smoothstep(.32,.82,a.x*.46+b.x*.34+swell.x*.20);
-    float celestialPath=pow(ndh,12.0)*pathBreakup*foreverStyle.y*(.70+1.40*fresnel)*max(ndl,.15);
-    float spec=(.18*broad+sparkle*glitterVariation)*foreverStyle.y*(.65+fresnel)*ndl+celestialPath*.75;
-    float shading=1+controls.z*.45*(dot(wave,l)-dot(n,l));
+    float pathBreakup=.22+1.35*smoothstep(.42,.88,a.x*.46+b.x*.34+swell.x*.20);
+    float celestialPath=pow(ndh,9)*pathBreakup*foreverStyle.y*(.45+1.15*fresnel)*ndl;
+    float spec=(.22*broad+sparkle*glitterVariation)*foreverStyle.y*(.65+fresnel)*ndl+celestialPath*.38;
+    float shading=1+controls.z*.6*(dot(wave,l)-dot(n,l));
     float energy=max(spec*controls.w,0);
-    energy=.55*energy/(.40+energy);
+    energy=.68*energy/(.42+energy);
     float luminance=dot(max(lightColor.rgb,0),float3(.2126,.7152,.0722));
-    float3 sheenColor=lerp(luminance.xxx,max(lightColor.rgb,0),.65);
+    float3 sheenColor=lerp(luminance.xxx,max(lightColor.rgb,0),.45);
     rgb=rgb*shading+sheenColor*energy;
 
     // 1. Water body: bottom refracted scene + depth absorption
@@ -183,31 +185,28 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
         float3 ray=safeNormalize(reflect(-v,wave));
         float3 hitColor=environment;
         float bestConfidence=0;
-        [unroll] for(int stepIndex=0;stepIndex<20;++stepIndex) {
-            float q=(stepIndex+1)/20.0;
-            float traceDistance=.35+q*q*reflectionStyle.y;
-            float3 samplePosition=viewPos+wave*.10+ray*traceDistance;
+        [unroll] for(int stepIndex=0;stepIndex<12;++stepIndex) {
+            float q=(stepIndex+1)/12.0;
+            float traceDistance=.45+q*q*reflectionStyle.y;
+            float3 samplePosition=viewPos+wave*.15+ray*traceDistance;
             float2 sampleUV=float2(.5+.5*samplePosition.x*reflectionProjection.z/max(samplePosition.z,.05),
                                    .5-.5*samplePosition.y*reflectionProjection.w/max(samplePosition.z,.05));
             float inside=step(0,sampleUV.x)*step(sampleUV.x,1)*step(0,sampleUV.y)*step(sampleUV.y,1)*step(.05,samplePosition.z);
             float raw=tex2Dlod(sceneDepth,float4(sampleUV,0,0)).r;
             float sceneZ=raw>=.9999?100000:reflectionProjection.y/(raw/max(reflectionControl.w,.001)-reflectionProjection.x);
             float difference=samplePosition.z-sceneZ;
-            float stepLength=max(reflectionStyle.y*(2*q-1.0/20.0)/(20.0),.25);
+            float stepLength=max(reflectionStyle.y*(2*q-1.0/12.0)/(12.0),.25);
             float thickness=reflectionStyle.z+stepLength*.72+traceDistance*.018;
             float range=saturate(1-abs(difference)/max(thickness,.01));
             float sided=step(-thickness*.28,difference)*step(difference,thickness);
             float border=saturate(min(min(sampleUV.x,sampleUV.y),min(1-sampleUV.x,1-sampleUV.y))*8);
             float confidence=inside*step(sceneZ,99999)*sided*range*border;
             float replace=step(bestConfidence+.0001,confidence);
-            float3 sampleColor=tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb;
-            float sampleLum=dot(sampleColor,float3(.2126,.7152,.0722));
-            sampleColor+=sampleColor*max(sampleLum-.7,0.0)*1.8;
-            hitColor=lerp(hitColor,sampleColor,replace);
+            hitColor=lerp(hitColor,tex2Dlod(sceneTexture,float4(sampleUV,0,0)).rgb,replace);
             edge=lerp(edge,border,replace);
             bestConfidence=max(bestConfidence,confidence);
         }
-        hit=saturate(bestConfidence*2.0);
+        hit=saturate(bestConfidence*1.8);
         edge*=hit;
         reflected=lerp(environment,hitColor,edge);
     }
@@ -296,21 +295,15 @@ void DrawStatus(IDirect3DDevice9* d,const char* external=nullptr,unsigned line=0
         const char* label=external?external:!active?"WATER OFF":frameMatches?"WATER ON":"WATER WAIT";
         const char* letters="WATERONFIHZX";
         const char* glyphs[]={"10001100011000110101101011101110001","01110100011000111111100011000110001","11111001000010000100001000010000100","11111100001000011110100001000011111","11110100011000111110101001001010001","01110100011000110001100011000101110","10001110011010110011100011000110001","11111100001000011110100001000010000","11111001000010000100001000010011111","10001100011000111111100011000110001","11111000010001000100010001000011111","10001100010101000100010101000110001"};
-        struct V {float x,y,z,w;DWORD color;};
-        std::vector<V> vertices;
-        auto rect=[&](float x,float y,float width,float height,DWORD color){y+=line*28.f;V a{x,y,0,1,color},b{x+width,y,0,1,color},c{x,y+height,0,1,color},e{x+width,y+height,0,1,color};vertices.insert(vertices.end(),{a,b,c,c,b,e});};
+        auto rect=[&](float x,float y,float width,float height,DWORD color){
+            y+=line*28.f;
+            D3DRECT r{static_cast<LONG>(x),static_cast<LONG>(y),
+                      static_cast<LONG>(x+width),static_cast<LONG>(y+height)};
+            d->Clear(1,&r,D3DCLEAR_TARGET,color,1.f,0);
+        };
         rect(16,40,160,25,0xff101820);
         DWORD color=strstr(label,"OFF")?0xffaaaaaa:strstr(label,"WAIT")?0xffffcc55:0xff66ff99;
         for(unsigned i=0;label[i];++i){const char* found=strchr(letters,label[i]);if(!found)continue;auto glyph=glyphs[found-letters];for(int y=0;y<7;++y)for(int x=0;x<5;++x)if(glyph[y*5+x]=='1')rect(22.f+i*12.f+x*2.f,46.f+y*2.f,2,2,color);}
-        ComPtr<IDirect3DStateBlock9> saved;
-        if(FAILED(d->CreateStateBlock(D3DSBT_ALL,saved.GetAddressOf()))||FAILED(saved->Capture()))return;
-        d->SetVertexShader(nullptr);d->SetPixelShader(nullptr);d->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);
-        d->SetTexture(0,nullptr);d->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
-        d->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);d->SetTextureStageState(1,D3DTSS_COLOROP,D3DTOP_DISABLE);
-        for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_LIGHTING,D3DRS_FOGENABLE,D3DRS_ALPHABLENDENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_SRGBWRITEENABLE})d->SetRenderState(s,FALSE);
-        d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);d->SetRenderState(D3DRS_FILLMODE,D3DFILL_SOLID);d->SetRenderState(D3DRS_COLORWRITEENABLE,15);
-        d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,static_cast<UINT>(vertices.size()/3),vertices.data(),sizeof(V));
-        saved->Apply();
     }catch(...){}
 }
 struct Scope {

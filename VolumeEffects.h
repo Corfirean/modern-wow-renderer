@@ -35,13 +35,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         float skyLuminance=dot(skyColor,float3(.2126,.7152,.0722));
         float sourceThreshold=clamp(mode.w, 0.40, 0.85);
         float sunDist=length(uv-sun.xy);
-        float sunMask=(sun.x<-.5) ? 0.0 : saturate(1.0 - sunDist*3.2);
-        float visibleSun=saturate((skyLuminance-sourceThreshold)/max(1-sourceThreshold,.01)) * sunMask;
-        float sunHalo=(sun.x<-.5) ? 0.0 : exp(-sunDist*14.0)*mode.y*1.2;
-        // Rays emanate strictly from the bright celestial disc in the sky, softly expanded by sunHalo.
-        // If there is no real bright sun disc in the sky (visibleSun == 0), amount is ZERO.
-        // This physically guarantees no phantom spots behind buildings, trees or in empty sky!
-        float amount=openness * visibleSun * (1.2 + sunHalo) * sun.z * 0.55;
+        float sunMask=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*18.0);
+        float visibleSun=saturate((skyLuminance-sourceThreshold)/max(1-sourceThreshold,.01));
+        // A soft sky gate around the exact projected sun remains present when
+        // the disc itself is hidden by a tower. Geometry cuts this source mask,
+        // and the radial pass turns that cut into crepuscular rays.
+        float skyGate=saturate((skyLuminance-sourceThreshold*.48)/max(1-sourceThreshold*.48,.01));
+        float amount=openness*sunMask*(.38*skyGate+1.25*visibleSun)*sun.z*(.62+mode.y*.35);
         if(mode.x>6.5)return float4(amount,amount,amount,1);
         float3 color=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.35,.75);
         return float4(color*amount,1);
@@ -129,39 +129,46 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 }
 )HLSL";
 
-// Depth-derived contact and directional shadows.
-// Screen-space: AO from depth discontinuities + directional ray march along light direction.
-// No light-space shadowmap required -- works everywhere including off-screen casters.
+// Depth-derived screen-space directional contact shadows. A ray is marched
+// from each visible surface toward the real sun; only a depth crossing along
+// that ray darkens the pixel, so flat ground is never globally multiplied down.
 inline const char* contactShadowPixelSource=R"HLSL(
 sampler2D depthMap:register(s0);
-// xy=1/full render size, z=strength, w=radius in full-resolution pixels
+// xy=1/full render size, z=strength, w=max view-space trace distance
 float4 tuning:register(c0);
-// x=projection A, y=projection B, z=viewport depth maximum
+// x=projection A, y=projection B, z=P00, w=P11
 float4 projection:register(c1);
+// xyz=view-space direction toward the sun, w=viewport depth maximum
+float4 light:register(c2);
 float linearZ(float raw) {
-    return raw>=.9999 ? 100000 : projection.y/(raw/max(projection.z,.001)-projection.x);
+    return raw>=.9999 ? 100000 : projection.y/(raw/max(light.w,.001)-projection.x);
 }
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     float center=linearZ(raw);
     if(center>99999)return 1;
-    const float2 dirs[8]={float2(1,0),float2(-1,0),float2(0,1),float2(0,-1),
-                          float2(.707,.707),float2(-.707,.707),float2(.707,-.707),float2(-.707,-.707)};
-    float occlusion=0,weightSum=0;
-    [unroll] for(int ring=1;ring<=2;++ring) [unroll] for(int i=0;i<8;++i) {
-        float radius=tuning.w*(ring*.5);
-        float2 q=uv+dirs[i]*tuning.xy*radius;
-        float neighbor=linearZ(tex2Dlod(depthMap,float4(q,0,0)).r);
-        float delta=center-neighbor;
-        float bias=.025+center*.0008;
-        float range=.65+center*.018+radius*.025;
-        float nearBlocker=saturate((delta-bias)/max(range*.28,.02))*saturate(1-delta/max(range,1e-3));
-        float weight=ring==1?1:.55;
-        occlusion+=nearBlocker*weight;weightSum+=weight;
+    float3 viewPos=float3((uv.x*2-1)*center/projection.z,
+                          (1-uv.y*2)*center/projection.w,center);
+    float3 towardLight=normalize(light.xyz);
+    float occlusion=0;
+    [unroll] for(int i=0;i<12;++i) {
+        float q=(i+1)/12.0;
+        float traceDistance=.30+q*q*tuning.w;
+        float3 samplePos=viewPos+towardLight*traceDistance;
+        float2 sampleUv=float2(.5+.5*samplePos.x*projection.z/max(samplePos.z,.05),
+                               .5-.5*samplePos.y*projection.w/max(samplePos.z,.05));
+        float inside=step(0,sampleUv.x)*step(sampleUv.x,1)*step(0,sampleUv.y)*step(sampleUv.y,1)*step(.05,samplePos.z);
+        float sceneZ=linearZ(tex2Dlod(depthMap,float4(sampleUv,0,0)).r);
+        float delta=samplePos.z-sceneZ;
+        float bias=.055+center*.0012;
+        float thickness=.30+traceDistance*.075;
+        float crossing=smoothstep(bias,bias+thickness*.25,delta)*
+                       (1-smoothstep(thickness,thickness*1.45,delta));
+        occlusion=max(occlusion,inside*step(sceneZ,99999)*crossing*(1-q*.35));
     }
-    occlusion=pow(saturate(occlusion/max(weightSum,.001)),.72);
-    float distanceFade=saturate(1-center/260.0);
-    float shade=1-tuning.z*occlusion*distanceFade;
+    float screenEdge=saturate(min(min(uv.x,uv.y),min(1-uv.x,1-uv.y))*24);
+    float distanceFade=saturate(1-center/320.0);
+    float shade=1-tuning.z*saturate(occlusion)*distanceFade*screenEdge;
     return float4(shade,shade,shade,1);
 }
 )HLSL";
@@ -248,4 +255,3 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     return float4(saturate(col),c.a);
 }
 )HLSL";
-

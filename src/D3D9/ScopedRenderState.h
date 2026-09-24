@@ -23,6 +23,7 @@ namespace renderer
             // Shaders & Vertex format
             m_device->GetVertexShader(m_vs.GetAddressOf());
             m_device->GetPixelShader(m_ps.GetAddressOf());
+            m_device->GetPixelShaderConstantF(0, m_psConstants[0], 16);
             m_device->GetFVF(&m_fvf);
             m_device->GetVertexDeclaration(m_vdecl.GetAddressOf());
             m_device->GetStreamSource(0, m_stream0.GetAddressOf(), &m_streamOffset, &m_streamStride);
@@ -110,6 +111,7 @@ namespace renderer
             // Restore Shaders & Vertex format
             m_device->SetVertexShader(m_vs.Get());
             m_device->SetPixelShader(m_ps.Get());
+            m_device->SetPixelShaderConstantF(0, m_psConstants[0], 16);
             if (m_vdecl)
                 m_device->SetVertexDeclaration(m_vdecl.Get());
             if (m_fvf != 0)
@@ -119,10 +121,11 @@ namespace renderer
             m_device->SetStreamSource(0, m_stream0.Get(), m_streamOffset, m_streamStride);
             m_device->SetIndices(m_indices.Get());
 
-            // Restore Viewport, Target & Depth
-            m_device->SetViewport(&m_vp);
+            // SetRenderTarget can reset the viewport (notably MinZ/MaxZ), so
+            // restore the viewport only after the framebuffer attachments.
             m_device->SetRenderTarget(0, m_rt.Get());
             DepthCapture::Instance().RawSetDepth(m_device, m_depth.Get());
+            m_device->SetViewport(&m_vp);
         }
 
     private:
@@ -135,6 +138,7 @@ namespace renderer
 
         ComPtr<IDirect3DVertexShader9> m_vs;
         ComPtr<IDirect3DPixelShader9> m_ps;
+        float m_psConstants[16][4]{};
         DWORD m_fvf = 0;
         ComPtr<IDirect3DVertexDeclaration9> m_vdecl;
         ComPtr<IDirect3DVertexBuffer9> m_stream0;

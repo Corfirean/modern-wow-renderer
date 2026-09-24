@@ -103,25 +103,41 @@ namespace renderer
 
             if (lz > 0.02f)
             {
-                float projX = (lx * v[4][0]) / lz;
-                float projY = (ly * v[5][1]) / lz;
-                float targetX = 0.5f + 0.5f * projX + config.sunOffsetX;
-                float targetY = 0.5f - 0.5f * projY * config.sunVerticalScale + config.sunOffsetY;
-                outConstants[2][0] = targetX;
-                outConstants[2][1] = targetY;
+                // The celestial disc and world geometry use this same perspective
+                // projection. Keeping the shaft origin in the identical space is
+                // essential: a dome/yaw-pitch approximation drifts vertically as
+                // the player tilts the camera and only occasionally meets the sun.
+                const float inverseZ = 1.0f / lz;
+                const float targetX = std::clamp(
+                    0.5f + 0.5f * lx * inverseZ * v[4][0] + config.sunOffsetX,
+                    -1.5f, 2.5f);
+                const float targetY = std::clamp(
+                    0.5f - 0.5f * ly * inverseZ * v[5][1] *
+                        std::max(config.sunVerticalScale, 0.05f) + config.sunOffsetY,
+                    -1.5f, 2.5f);
+
+                // Do not smooth screen coordinates: even a short temporal lag
+                // visibly detaches the rays from the disc during camera motion.
+                m_smoothedSunX = targetX;
+                m_smoothedSunY = targetY;
+
+                outConstants[2][0] = m_smoothedSunX;
+                outConstants[2][1] = m_smoothedSunY;
 
                 float facing = std::clamp((lz + 0.05f) * 2.5f, 0.0f, 1.0f);
-                if (targetX < -0.50f || targetX > 1.50f || targetY < -0.50f || targetY > 1.50f)
+                if (targetX < -0.35f || targetX > 1.35f || targetY < -0.35f || targetY > 1.35f)
                     facing = 0.0f;
 
                 outConstants[2][2] = config.strength * (daylight + config.moonStrength * moonlight) * facing;
 
-                frameContext.sunScreenX = targetX;
-                frameContext.sunScreenY = targetY;
+                frameContext.sunScreenX = m_smoothedSunX;
+                frameContext.sunScreenY = m_smoothedSunY;
                 frameContext.sunStrength = outConstants[2][2];
             }
             else
             {
+                m_smoothedSunX = -1.0f;
+                m_smoothedSunY = -1.0f;
                 frameContext.sunScreenX = -1.0f;
                 frameContext.sunScreenY = -1.0f;
                 frameContext.sunStrength = 0.0f;
@@ -131,6 +147,8 @@ namespace renderer
         }
         else
         {
+            m_smoothedSunX = -1.0f;
+            m_smoothedSunY = -1.0f;
             outConstants[10][0] = 0.0f;
             outConstants[10][1] = 0.0f;
             outConstants[10][2] = 1.0f;

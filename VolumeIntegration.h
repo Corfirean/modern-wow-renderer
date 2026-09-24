@@ -20,6 +20,7 @@ using GetDepthFn=HRESULT(WINAPI*)(IDirect3DDevice9*,IDirect3DSurface9**);
 SetDepthFn setDepth=nullptr; GetDepthFn getDepth=nullptr;
 bool enabled=false,active=true,ready=false,composed=false,internal=false;
 bool fogEffectEnabled=true,shaftsEffectEnabled=true,shadowsEffectEnabled=true,shadowMapEnabled=false,cloudShadowsEffectEnabled=true,temporalShaftsEnabled=false;
+bool postProcessEffectEnabled=true;
 bool sunGlareEnabled=true;
 float sunGlareStrength=0.25f;
 UINT shadowMapUpdateInterval=2;
@@ -267,6 +268,7 @@ void ReloadTuning() {
     contrastPercent = std::clamp(ReadTuning(L"ContrastPercent", 100, L"PostProcess"), 50, 180);
     gammaPercent = std::clamp(ReadTuning(L"GammaPercent", 100, L"PostProcess"), 50, 180);
     sharpnessPercent = std::clamp(ReadTuning(L"SharpnessPercent", 35, L"PostProcess"), 0, 100);
+    postProcessEffectEnabled = ReadTuning(L"Enabled", 1, L"PostProcess") != 0;
     sunGlowPercent = std::clamp(ReadTuning(L"SunGlowPercent", 80), 0, 300);
     sunGlareEnabled = ReadTuning(L"SunGlareEnabled", 1) != 0;
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
@@ -324,20 +326,18 @@ HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** out) {
     return renderer::DepthCapture::Instance().HookGetDepth(d, out);
 }
 
-inline UINT cameraCaptureAttempts = 0;
-
 inline bool HasActiveEffects() {
     bool hasContact = (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0);
     bool hasFog = (!shaftDebug && fogEffectEnabled);
-    bool hasVolumetric = renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
+    bool hasVolumetric = shaftsEffectEnabled && renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
     bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
-    bool hasPost = (legacyShaders.postProcess && (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0));
+    bool hasPost = postProcessEffectEnabled &&
+        (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0);
     return hasContact || hasFog || hasVolumetric || hasGlare || hasPost;
 }
 
 void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
     if (!enabled || !active || internal) return;
-    cameraCaptureAttempts = 0;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
     renderer::DepthCapture::Instance().BeforeClear(d, count, flags, z);
     depth = renderer::DepthCapture::Instance().GetDepthTexture();
@@ -347,6 +347,9 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
     owner = renderer::DepthCapture::Instance().GetOwner();
     depthFrames = renderer::DepthCapture::Instance().GetDepthFrames();
     if (renderer::DepthCapture::Instance().HasDepth()) {
+        auto& frameCtx = renderer::FrameContext::Current();
+        ++frameCtx.frameIndex;
+        frameCtx.device = d;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
     }
 }
@@ -494,7 +497,8 @@ inline bool ShouldUpdateShadows()
 template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::DrawClassification& dc, DrawCall&& draw) {
     if (!enabled || !active || internal || !ready || !shadowsEffectEnabled || !shadowMapEnabled || directionalShadowStrength <= 0 || owner != d) return;
     if (!dc.castsShadow) return;
-    if (!volumetricCharacterShadows && dc.material == renderer::MaterialType::Character) return;
+    if (!volumetricCharacterShadows &&
+        (dc.material == renderer::MaterialType::Character || dc.material == renderer::MaterialType::M2)) return;
     if (!ShouldUpdateShadows()) return;
 
     renderer::ScopedCpuTimer shadowTimer(renderer::PerfStage::ShadowMapBuild);
@@ -521,11 +525,14 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
     if (!shadowFrameValid) return;
 
     D3DVIEWPORT9 oldVp{}; d->GetViewport(&oldVp);
-    DWORD colorWrite = 0, zEnable = 0, zFunc = 0, fog = 0, alphaTest = 0, oldDepthBias = 0, oldSlopeBias = 0, oldCull = 0;
+    DWORD colorWrite = 0, zEnable = 0, zWrite = 0, zFunc = 0, fog = 0;
+    DWORD alphaBlend = 0, alphaTest = 0, oldDepthBias = 0, oldSlopeBias = 0, oldCull = 0;
     d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
     d->GetRenderState(D3DRS_ZENABLE, &zEnable);
+    d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
     d->GetRenderState(D3DRS_ZFUNC, &zFunc);
     d->GetRenderState(D3DRS_FOGENABLE, &fog);
+    d->GetRenderState(D3DRS_ALPHABLENDENABLE, &alphaBlend);
     d->GetRenderState(D3DRS_ALPHATESTENABLE, &alphaTest);
     d->GetRenderState(D3DRS_DEPTHBIAS, &oldDepthBias);
     d->GetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, &oldSlopeBias);
@@ -585,9 +592,9 @@ template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::Dr
     d->SetViewport(&oldVp);
     d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
     d->SetRenderState(D3DRS_ZENABLE, zEnable);
-    d->SetRenderState(D3DRS_ZWRITEENABLE, renderer::g_trackedState.zWrite ? TRUE : FALSE);
+    d->SetRenderState(D3DRS_ZWRITEENABLE, zWrite);
     d->SetRenderState(D3DRS_ZFUNC, zFunc);
-    d->SetRenderState(D3DRS_ALPHABLENDENABLE, renderer::g_trackedState.alphaBlend ? TRUE : FALSE);
+    d->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend);
     d->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest);
     d->SetRenderState(D3DRS_DEPTHBIAS, oldDepthBias);
     d->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, oldSlopeBias);
@@ -686,10 +693,13 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetTexture(0, depth.Get()));
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
-        float shadowTuning[4] = { 1.f / desc.Width, 1.f / desc.Height, contactShadowStrength, contactShadowRadius };
-        float contactShadowProjection[4] = { constants[0][0], constants[0][1], constants[2][3], 0 };
+        float shadowTuning[4] = { 1.f / desc.Width, 1.f / desc.Height, contactShadowStrength,
+                                  std::clamp(shadowMapDistance * .35f, 12.f, 90.f) };
+        float contactShadowProjection[4] = { constants[0][0], constants[0][1], constants[0][2], constants[0][3] };
+        float contactShadowLight[4] = { constants[10][0], constants[10][1], constants[10][2], constants[2][3] };
         check(d->SetPixelShaderConstantF(0, shadowTuning, 1));
         check(d->SetPixelShaderConstantF(1, contactShadowProjection, 1));
+        check(d->SetPixelShaderConstantF(2, contactShadowLight, 1));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
         if (ok) drawQuad(rayWidth, rayHeight);
 
@@ -732,7 +742,8 @@ bool Composite(IDirect3DDevice9* d) {
     }
 
     // Directional Volumetric Lighting (World-Space Raymarch)
-    renderer::DirectionalVolumetricLighting::Instance().Render(d, renderer::FrameContext::Current(), target.Get());
+    if (shaftsEffectEnabled)
+        renderer::DirectionalVolumetricLighting::Instance().Render(d, renderer::FrameContext::Current(), target.Get());
 
     // Secondary Sun Radial Glare pass
     if (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug)) {
@@ -825,7 +836,8 @@ bool Composite(IDirect3DDevice9* d) {
     }
 
     // Post-processing pass
-    if (legacyShaders.postProcess && (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) {
+    if (postProcessEffectEnabled && legacyShaders.postProcess &&
+        (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) {
         renderer::ScopedCpuTimer postTimer(renderer::PerfStage::PostProcess);
         if (SUCCEEDED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE))) {
             check(d->SetRenderTarget(0, target.Get()));
@@ -970,13 +982,20 @@ void BeforeDraw(IDirect3DDevice9* d) {
 
     if (ready && !isUi) return;
 
-    if (!ready && cameraCaptureAttempts < 16 && renderer::g_trackedState.currentVS != nullptr) {
-        ++cameraCaptureAttempts;
+    // Try camera capture on every draw where:
+    //   - depth capture is active this frame (surface != nullptr)
+    //   - a vertex shader is bound (not fixed-function / UI pass)
+    //   - current depth buffer matches our INTZ surface
+    // No attempt-count limit: WoW's early draws (skybox, shadow, pre-pass) don't carry
+    // the 27 perspective constants; world terrain arrives at draw ~20-50+ and must be reached.
+    if (!ready && surface != nullptr && renderer::g_trackedState.currentVS != nullptr) {
         ComPtr<IDirect3DSurface9> ds;
         if (SUCCEEDED(getDepth(d, ds.GetAddressOf())) && ds.Get() == surface.Get()) {
             cameraCaptureShaderHash = renderer::g_trackedState.vsHash;
             ready = CaptureCamera(d);
-            if (ready) ++cameraFrames;
+            if (ready) {
+                ++cameraFrames;
+            }
         }
     }
 
@@ -994,7 +1013,6 @@ void BeforeDraw(IDirect3DDevice9* d) {
 }
 
 void Present(IDirect3DDevice9* d) {
-    cameraCaptureAttempts = 0;
     if (enabled && active && !composed && ready) {
         composed = true;
         Composite(d);

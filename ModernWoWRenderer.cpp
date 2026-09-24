@@ -111,6 +111,8 @@ void DrawAtmosphere(IDirect3DDevice9*)
     // Obsolete 2D screen quad completely disabled: volume rendering provides true 3D atmosphere.
 }
 
+void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device);
+
 HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 {
     if (!unified && (GetAsyncKeyState(VK_F10) & 1))
@@ -160,9 +162,18 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DepthCapture::Instance().Reset(d);
     renderer::CameraCapture::Instance().Reset();
-    return originalReset(d,p);
+    HRESULT hr=originalReset(d,p);
+    if(SUCCEEDED(hr)){
+        renderer::g_trackedState={};
+        RestoreDeviceHooksAfterReset(d);
+    }
+    return hr;
 }
 HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
+    const bool waterNeedsDepth=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled&&
+        (watereffect::reflectionsEnabled||watereffect::refractionEnabled||watereffect::depthEnabled||watereffect::foamEnabled);
+    if(g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
+        return originalClear(d,n,rect,flags,color,z,stencil);
     renderer::RendererDiagnostics::Instance().OnFrameBegin();
     volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
 }
@@ -180,20 +191,20 @@ SetPixelShaderFn originalSetPixelShader = nullptr;
 
 HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* vs)
 {
-    if (renderer::g_trackedState.currentVS != vs)
+    if (renderer::g_trackedState.currentVS != vs || (vs && renderer::g_trackedState.vsHash == 0))
     {
         renderer::g_trackedState.currentVS = vs;
-        renderer::g_trackedState.vsHash = vs ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
+        renderer::g_trackedState.vsHash = (vs && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(vs) : 0;
     }
     return originalSetVertexShader(d, vs);
 }
 
 HRESULT WINAPI HookedSetPixelShader(IDirect3DDevice9* d, IDirect3DPixelShader9* ps)
 {
-    if (renderer::g_trackedState.currentPS != ps)
+    if (renderer::g_trackedState.currentPS != ps || (ps && renderer::g_trackedState.psHash == 0))
     {
         renderer::g_trackedState.currentPS = ps;
-        renderer::g_trackedState.psHash = ps ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
+        renderer::g_trackedState.psHash = (ps && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
     }
     return originalSetPixelShader(d, ps);
 }
@@ -246,7 +257,12 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
 
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
     if(volume::internal)return originalDraw(d,t,start,n);
+    if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
+        auto dc=ClassifyCurrentDraw(d,t,n);
+        volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
+    }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
@@ -257,7 +273,12 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
 
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
+        auto dc=ClassifyCurrentDraw(d,t,n);
+        volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+    }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
@@ -268,7 +289,12 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
 
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
     if(volume::internal)return originalDrawUP(d,t,n,v,stride);
+    if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
+        auto dc=ClassifyCurrentDraw(d,t,n);
+        volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
+    }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
@@ -279,13 +305,49 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
 
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
     if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
+        auto dc=ClassifyCurrentDraw(d,t,n);
+        volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});
+    }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+}
+
+void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
+{
+    if(!device)return;
+    void** table=*reinterpret_cast<void***>(device);
+    DWORD oldProtect=0;
+    if(!VirtualProtect(&table[16],95*sizeof(void*),PAGE_READWRITE,&oldProtect))return;
+
+    InterlockedExchangePointer(&table[42],reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[57],reinterpret_cast<void*>(HookedSetRenderState));
+    InterlockedExchangePointer(&table[87],reinterpret_cast<void*>(HookedSetVertexDeclaration));
+    InterlockedExchangePointer(&table[89],reinterpret_cast<void*>(HookedSetFVF));
+    InterlockedExchangePointer(&table[92],reinterpret_cast<void*>(HookedSetVertexShader));
+    InterlockedExchangePointer(&table[107],reinterpret_cast<void*>(HookedSetPixelShader));
+    if(waterdiag::enabled||waterhighlight::enabled||watereffect::enabled||distancefog::enabled||volume::enabled||unified){
+        InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
+        InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
+        InterlockedExchangePointer(&table[81],reinterpret_cast<void*>(HookedDraw));
+        InterlockedExchangePointer(&table[82],reinterpret_cast<void*>(HookedDrawIndexed));
+        InterlockedExchangePointer(&table[83],reinterpret_cast<void*>(HookedDrawUP));
+        InterlockedExchangePointer(&table[84],reinterpret_cast<void*>(HookedDrawIndexedUP));
+    }
+    if(volume::enabled){
+        InterlockedExchangePointer(&table[39],reinterpret_cast<void*>(volume::SetDepth));
+        InterlockedExchangePointer(&table[40],reinterpret_cast<void*>(volume::GetDepth));
+        InterlockedExchangePointer(&table[43],reinterpret_cast<void*>(HookedClear));
+    }
+    DWORD ignored=0;
+    VirtualProtect(&table[16],95*sizeof(void*),oldProtect,&ignored);
+    g_hookedTable=table;
 }
 
 void HookDevice(IDirect3DDevice9* device)

@@ -34,7 +34,8 @@ inline void Expose(){
 }
 
 inline void Prepare(IDirect3DDevice9* d){
- if(!watereffect::enabled||!watereffect::active||volume::internal||!IsWater(d))return;
+ if(!watereffect::enabled||!watereffect::active||!watereffect::effectEnabled||
+    !watereffect::reflectionsEnabled||volume::internal||!IsWater(d))return;
  if(ready){Expose();return;}
  if(volume::owner!=d||!volume::ready||!volume::target||!volume::depth)return;
  D3DSURFACE_DESC desc{};

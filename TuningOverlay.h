@@ -16,11 +16,13 @@ inline std::vector<Item> items={
  // === ATMOSPHERE & GOD RAYS ===
  {KIND_HEADER,nullptr,nullptr,"--- ATMOSPHERE & GOD RAYS ---",0,0,0,0},
  {KIND_TOGGLE,L"Atmosphere",L"ShaftsEnabled","SUN RAYS",0,1,1,1},
+ {KIND_TOGGLE,L"Atmosphere",L"DirectionalVolumetricEnabled","VOLUMETRIC (HEAVY)",0,1,1,0},
  {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,400,5,160},
  {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,200,5,80},
  {KIND_SLIDER,L"Atmosphere",L"SunVerticalProjectionPercent","SUN VERT SCALE",10,100,2,40},
  {KIND_SLIDER,L"Atmosphere",L"SunOffsetYPercent","SUN OFFSET Y",-50,50,1,0},
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
+ {KIND_TOGGLE,L"DistanceFog",L"Enabled","DISTANCE HAZE",0,1,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
  {KIND_SLIDER,L"Atmosphere",L"BaseHeight","FOG BASE HEIGHT",-50,200,2,28},
  {KIND_SLIDER,L"Atmosphere",L"FogWashPercent","FOG WASH",0,100,2,35},
@@ -43,13 +45,14 @@ inline std::vector<Item> items={
 
  // === DYNAMIC SHADOWS ===
  {KIND_HEADER,nullptr,nullptr,"--- DYNAMIC SHADOWS ---",0,0,0,0},
- {KIND_TOGGLE,L"Atmosphere",L"ShadowsEnabled","SHADOWS",0,1,1,1},
+ {KIND_TOGGLE,L"Atmosphere",L"ShadowsEnabled","CONTACT SHADOW",0,1,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DirectionalShadowPercent","SHADOW STRENGTH",0,100,5,45},
  {KIND_SLIDER,L"Atmosphere",L"ShadowMapDistance","SHADOW DIST",50,300,10,180},
  {KIND_SLIDER,L"Atmosphere",L"ContactShadowPercent","CONTACT SHADOW",0,60,2,25},
 
  // === IMAGE & COLOR ===
  {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},
+ {KIND_TOGGLE,L"PostProcess",L"Enabled","POST PROCESS",0,1,1,0},
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"GammaPercent","GAMMA",50,180,2,100},

@@ -365,8 +365,8 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
         int skySamples = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricSkySampleCount", 6, iniPath.c_str());
         m_settings.skySampleCount = static_cast<uint32_t>(std::clamp(skySamples, 2, 16));
 
-        int resPercent = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricResolutionPercent", 25, iniPath.c_str());
-        m_settings.resolutionPercent = static_cast<float>(std::clamp(resPercent, 20, 100));
+        int resPercent = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricResolutionPercent", 12, iniPath.c_str());
+        m_settings.resolutionPercent = static_cast<float>(std::clamp(resPercent, 10, 100));
 
         m_settings.temporalEnabled = GetPrivateProfileIntW(L"Atmosphere", L"VolumetricTemporalEnabled", 1, iniPath.c_str()) != 0;
 

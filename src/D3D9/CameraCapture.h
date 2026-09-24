@@ -40,12 +40,20 @@ namespace renderer
         bool IsValid() const { return m_valid; }
         uint32_t GetCapturedFrames() const { return m_capturedFrames; }
         uint64_t GetCameraCaptureShaderHash() const { return m_cameraCaptureShaderHash; }
-        void Reset() { m_valid = false; m_cameraCaptureShaderHash = 0; }
+        void Reset()
+        {
+            m_valid = false;
+            m_cameraCaptureShaderHash = 0;
+            m_smoothedSunX = -1.0f;
+            m_smoothedSunY = -1.0f;
+        }
 
     private:
         CameraCapture() = default;
         bool m_valid = false;
         uint32_t m_capturedFrames = 0;
         uint64_t m_cameraCaptureShaderHash = 0;
+        float m_smoothedSunX = -1.0f;
+        float m_smoothedSunY = -1.0f;
     };
 }
