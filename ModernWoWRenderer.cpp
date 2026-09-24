@@ -274,7 +274,9 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    return originalDraw(d,t,start,n);
+    HRESULT hr=originalDraw(d,t,start,n);
+    if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
+    return hr;
 }
 
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
@@ -292,7 +294,9 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    HRESULT hr=originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
+    return hr;
 }
 
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
@@ -310,7 +314,9 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    return originalDrawUP(d,t,n,v,stride);
+    HRESULT hr=originalDrawUP(d,t,n,v,stride);
+    if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
+    return hr;
 }
 
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
@@ -328,7 +334,9 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
-    return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    HRESULT hr=originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
+    return hr;
 }
 
 void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
