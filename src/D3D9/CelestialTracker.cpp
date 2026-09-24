@@ -86,14 +86,9 @@ namespace renderer
         if (FAILED(device->GetTransform(D3DTS_PROJECTION, &proj))) return;
 
         float worldScaleSq = world.m[0][0] * world.m[0][0] + world.m[0][1] * world.m[0][1] + world.m[0][2] * world.m[0][2];
-        // Widened from the original (0.02 / [6,20]) after in-game testing:
-        // near screen edges the billboard's VIEW-space offset shifts more
-        // of its magnitude into x/y (wider viewing angle from forward),
-        // which can push z below the old lower bound and nudge the
-        // translation-zero check for the sun pattern outside its old
-        // epsilon. The other three gates (fixed-function, alphaTest,
-        // texture bound, plus the WORLD-scale shape) already carry the
-        // real discriminating power, so these can afford to be generous.
+        // The sun's zero-translation/large-scale epsilons stay slightly
+        // generous (0.05 / 0.15) - confirmed by in-game testing to track
+        // the sun correctly everywhere on screen with no edge issue.
         bool viewTranslationZero = std::fabs(view.m[3][0]) < 0.05f && std::fabs(view.m[3][1]) < 0.05f && std::fabs(view.m[3][2]) < 0.05f;
         bool worldIsLargeScale = worldScaleSq >= 4.0f;
         bool worldIsIdentityScale = std::fabs(worldScaleSq - 1.0f) < 0.15f;
@@ -116,8 +111,17 @@ namespace renderer
         {
             UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex);
         }
-        else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 1.0f && viewTransZ < 40.0f)
+        else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 9.0f && viewTransZ < 15.0f)
         {
+            // Tight on purpose: four independent in-game captures of the
+            // real moon all landed z in [11.4, 12.0]. An earlier, much
+            // wider range (1,40) let through an unrelated draw at z=1.42
+            // (tx=-11.3, ty=3.74 - a completely different position) that
+            // also happened to match every other gate, and since this
+            // function keeps the LAST match seen each frame, that impostor
+            // silently overwrote the real moon on frames where both were
+            // observed. [9,15] comfortably encloses the real signal with
+            // margin while excluding that impostor by a wide margin.
             UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex);
         }
     }
