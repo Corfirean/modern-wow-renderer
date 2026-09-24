@@ -63,6 +63,10 @@ inline std::vector<Item> items={
  // addresses/selection logic are an unverified third-party-derived
  // hypothesis, this toggle exists to visually prove or disprove them.
  {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMemoryProbe","+ MEMORY PROBE (GREEN/CYAN)",0,1,1,0},
+ // Tints the F9-found candidate draw (fixed-function, zero-translation
+ // VIEW = skybox trick, large-scale WORLD billboard) magenta, live. If it
+ // lands on the real sun/moon disc, the classification is confirmed.
+ {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialCandidateHighlight","CANDIDATE HIGHLIGHT (MAGENTA)",0,1,1,0},
  // Hidden fallback only: the real sun/moon screen position now comes from
  // the light direction + projection, not from these. Leave at neutral
  // (100/0/0) unless the marker above proves the projection itself is off.
