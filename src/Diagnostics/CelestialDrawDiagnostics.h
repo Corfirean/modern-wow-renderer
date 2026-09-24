@@ -142,6 +142,22 @@ void Draw(IDirect3DDevice9* d,const char* kind,D3DPRIMITIVETYPE type,UINT count)
             log<<"  VSF[0..7] hr="<<vch;
             if(SUCCEEDED(vch)) for(auto& row:vsConst) for(float v:row) log<<' '<<v;
             log<<'\n';
+
+            // Fixed-function draws (no vertex shader) place geometry via the
+            // classic transform pipeline instead of shader constants - this
+            // is the only way to recover where such a draw actually sits.
+            for(auto xf:{D3DTS_WORLD,D3DTS_VIEW,D3DTS_PROJECTION}) {
+                D3DMATRIX m{};
+                HRESULT th=d->GetTransform(xf,&m);
+                log<<"  XF"<<int(xf)<<" hr="<<th;
+                if(SUCCEEDED(th)) for(auto& row:m.m) for(float v:row) log<<' '<<v;
+                log<<'\n';
+            }
+            ComPtr<IDirect3DVertexDeclaration9> decl;
+            HRESULT dh=d->GetVertexDeclaration(decl.GetAddressOf());
+            log<<"  VDECL hr="<<dh<<" object="<<decl.Get()<<'\n';
+            DWORD fvf=0; HRESULT fh=d->GetFVF(&fvf);
+            log<<"  FVF hr="<<fh<<" value="<<fvf<<'\n';
         }
 
         if(!log) { Finish("write-error"); enabled=false; }
