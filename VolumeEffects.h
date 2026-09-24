@@ -35,7 +35,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         float skyLuminance=dot(skyColor,float3(.2126,.7152,.0722));
         float sourceThreshold=clamp(mode.w, 0.40, 0.85);
         float sunDist=length(uv-sun.xy);
-        float sunMask=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*18.0);
+        // The source mask must stay locked to the real celestial disc: a wide,
+        // slow-decaying gaussian let bright clouds anywhere near the sun read
+        // as a second emitter. This is a tight, hard-clipped falloff so only
+        // the disc itself (and its immediate glow) can seed the rays; geometry
+        // and cloud brightness elsewhere only ever occlude, never emit.
+        float discFalloff=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*260.0);
+        float discCutoff=1.0-smoothstep(0.10,0.16,sunDist);
+        float sunMask=discFalloff*discCutoff;
         float visibleSun=saturate((skyLuminance-sourceThreshold)/max(1-sourceThreshold,.01));
         // A soft sky gate around the exact projected sun remains present when
         // the disc itself is hidden by a tower. Geometry cuts this source mask,
@@ -228,6 +235,28 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float rawBright=saturate((rawPeak-localTuning.w)/max(1-localTuning.w,.01));
     float3 glow=(localMode.x>.5?float3(rawBright,0,0):sourceAt(uv))*localTuning.z*24.0;
     return float4(glow,1);
+}
+)HLSL";
+
+// Debug-only crosshair drawn at the exact screen position rays/glare use for
+// the celestial source. If this ring does not sit on the real sun/moon disc
+// at any yaw/pitch, the source projection is still wrong - this is the check.
+inline const char* celestialMarkerPixelSource=R"HLSL(
+// xy=target uv, z=valid, w=unused
+float4 markerTarget:register(c0);
+float4 markerColor:register(c1);
+// xy=1/render size (pixels -> uv)
+float4 markerSize:register(c2);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float valid=markerTarget.z;
+    float2 d=(uv-markerTarget.xy)/markerSize.xy;
+    float dist=length(d);
+    float ring=abs(dist-16.0);
+    float ringMask=1-smoothstep(1.2,2.6,ring);
+    float onXAxis=(1-smoothstep(1.2,2.2,abs(d.y)))*step(6.0,dist)*step(dist,26.0);
+    float onYAxis=(1-smoothstep(1.2,2.2,abs(d.x)))*step(6.0,dist)*step(dist,26.0);
+    float mask=saturate(ringMask+onXAxis+onYAxis)*valid;
+    return float4(markerColor.rgb*mask,mask);
 }
 )HLSL";
 

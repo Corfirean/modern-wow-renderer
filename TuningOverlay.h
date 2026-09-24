@@ -16,11 +16,9 @@ inline std::vector<Item> items={
  // === ATMOSPHERE & GOD RAYS ===
  {KIND_HEADER,nullptr,nullptr,"--- ATMOSPHERE & GOD RAYS ---",0,0,0,0},
  {KIND_TOGGLE,L"Atmosphere",L"ShaftsEnabled","SUN RAYS",0,1,1,1},
- {KIND_TOGGLE,L"Atmosphere",L"DirectionalVolumetricEnabled","VOLUMETRIC (HEAVY)",0,1,1,0},
+ {KIND_TOGGLE,L"Atmosphere",L"DirectionalVolumetricEnabled","VOLUMETRIC (HYBRID)",0,1,1,0},
  {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,400,5,160},
  {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,200,5,80},
- {KIND_SLIDER,L"Atmosphere",L"SunVerticalProjectionPercent","SUN VERT SCALE",10,100,2,40},
- {KIND_SLIDER,L"Atmosphere",L"SunOffsetYPercent","SUN OFFSET Y",-50,50,1,0},
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
  {KIND_TOGGLE,L"DistanceFog",L"Enabled","DISTANCE HAZE",0,1,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
@@ -56,7 +54,17 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"GammaPercent","GAMMA",50,180,2,100},
- {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35}
+ {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35},
+
+ // === DEBUG (celestial source tracking) ===
+ {KIND_HEADER,nullptr,nullptr,"--- DEBUG - CELESTIAL TRACKING ---",0,0,0,0},
+ {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMarker","SUN/MOON MARKER",0,1,1,0},
+ // Hidden fallback only: the real sun/moon screen position now comes from
+ // the light direction + projection, not from these. Leave at neutral
+ // (100/0/0) unless the marker above proves the projection itself is off.
+ {KIND_SLIDER,L"Atmosphere",L"SunVerticalProjectionPercent","SUN VERT SCALE (DEBUG)",10,100,2,100},
+ {KIND_SLIDER,L"Atmosphere",L"SunOffsetXPercent","SUN OFFSET X (DEBUG)",-50,50,1,0},
+ {KIND_SLIDER,L"Atmosphere",L"SunOffsetYPercent","SUN OFFSET Y (DEBUG)",-50,50,1,0}
 };
 inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(GetPrivateProfileIntW(i.section,i.key,i.value,ini.c_str())),i.lo,i.hi);}}
 inline void Save(Item& i){if(i.kind==KIND_HEADER)return;wchar_t b[32]{};_itow_s(i.value,b,10);WritePrivateProfileStringW(i.section,i.key,b,ini.c_str());}

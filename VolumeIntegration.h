@@ -40,6 +40,7 @@ struct LegacyVolumeShaders
     ComPtr<IDirect3DPixelShader9> postProcess;
     ComPtr<IDirect3DPixelShader9> rayComposite;
     ComPtr<IDirect3DPixelShader9> localLight;
+    ComPtr<IDirect3DPixelShader9> celestialMarker;
 
     bool Ensure(IDirect3DDevice9* d);
     void Reset();
@@ -91,7 +92,7 @@ FrameResources& resources = *new FrameResources;
 auto& depth = resources.depth; auto& surface = resources.surface;
 auto& originalDepth = resources.originalDepth; auto& target = resources.target;
 
-ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, localLightBytecode, radialBytecode, contactShadowBytecode, postProcessBytecode, rayCompositeBytecode;
+ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, localLightBytecode, radialBytecode, contactShadowBytecode, postProcessBytecode, rayCompositeBytecode, celestialMarkerBytecode;
 float constants[13][4]{};
 uint64_t cameraCaptureShaderHash = 0;
 float capturedViewTranslation[3]{};
@@ -112,6 +113,7 @@ float celestialShadowLight = 0;
 float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
 bool localLightDebug = false;
+bool celestialMarkerDebug = false;
 unsigned frames = 0, applied = 0, depthFrames = 0, cameraFrames = 0, shadowDraws = 0, shadowFrameDraws = 0;
 std::wstring logPath;
 std::wstring mainIni, tuningIni;
@@ -142,6 +144,7 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     if (!postProcessBytecode) D3DCompile(postProcessPixelSource, strlen(postProcessPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, postProcessBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
     if (!rayCompositeBytecode) D3DCompile(rayCompositePixelSource, strlen(rayCompositePixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, rayCompositeBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
     if (!localLightBytecode) D3DCompile(localLightPixelSource, strlen(localLightPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, localLightBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
+    if (!celestialMarkerBytecode) D3DCompile(celestialMarkerPixelSource, strlen(celestialMarkerPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, celestialMarkerBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
 
     if (!bytecode || !blurBytecode || !copyBytecode || !temporalBytecode || !radialBytecode || !contactShadowBytecode)
         return false;
@@ -157,6 +160,7 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     if (postProcessBytecode) d->CreatePixelShader(static_cast<DWORD*>(postProcessBytecode->GetBufferPointer()), postProcess.GetAddressOf());
     if (rayCompositeBytecode) d->CreatePixelShader(static_cast<DWORD*>(rayCompositeBytecode->GetBufferPointer()), rayComposite.GetAddressOf());
     if (localLightBytecode) d->CreatePixelShader(static_cast<DWORD*>(localLightBytecode->GetBufferPointer()), localLight.GetAddressOf());
+    if (celestialMarkerBytecode) d->CreatePixelShader(static_cast<DWORD*>(celestialMarkerBytecode->GetBufferPointer()), celestialMarker.GetAddressOf());
 
     return true;
 }
@@ -172,6 +176,7 @@ void LegacyVolumeShaders::Reset()
     postProcess.Reset();
     rayComposite.Reset();
     localLight.Reset();
+    celestialMarker.Reset();
     owner = nullptr;
 }
 
@@ -274,6 +279,7 @@ void ReloadTuning() {
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
     shaftDebug = ReadTuning(L"ShaftDebugMask", 0) != 0;
     localLightDebug = ReadTuning(L"LocalLightDebugMask", 0) != 0;
+    celestialMarkerDebug = ReadTuning(L"DebugCelestialMarker", 0) != 0;
 
     renderer::PerformanceProfiler::Instance().SetGpuProfilingEnabled(ReadTuning(L"GpuProfilingEnabled", 0) != 0);
 
@@ -683,12 +689,18 @@ bool Composite(IDirect3DDevice9* d) {
     check(d->SetViewport(&fullVp));
     check(d->SetPixelShaderConstantF(0, constants[0], 13));
 
-    // Screen-space contact shadows
+    // Screen-space contact shadows.
+    // Rendered and composited at FULL resolution, straight onto target: the
+    // raymarch shader already produces analytic soft edges via smoothstep, so
+    // no extra blur pass is needed. A half-res mask upsampled through a
+    // depth-unaware blur was smearing shadow onto whatever sat behind a
+    // silhouette edge (halo / doubled-image leakage) - this composites the
+    // exact per-pixel result instead.
     if (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
         renderer::ScopedCpuTimer contactTimer(renderer::PerfStage::ContactShadows);
         check(d->SetRenderTarget(0, legacyTargets.rayASurface.Get()));
-        D3DVIEWPORT9 shadowVp{ 0, 0, rayWidth, rayHeight, 0, 1 };
-        check(d->SetViewport(&shadowVp));
+        D3DVIEWPORT9 fullResVp{ 0, 0, desc.Width, desc.Height, 0, 1 };
+        check(d->SetViewport(&fullResVp));
         check(d->SetPixelShader(legacyShaders.contactShadow.Get()));
         check(d->SetTexture(0, depth.Get()));
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
@@ -701,23 +713,15 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetPixelShaderConstantF(1, contactShadowProjection, 1));
         check(d->SetPixelShaderConstantF(2, contactShadowLight, 1));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-        if (ok) drawQuad(rayWidth, rayHeight);
-
-        check(d->SetTexture(0, nullptr));
-        check(d->SetPixelShader(legacyShaders.blur.Get()));
-        check(d->SetRenderTarget(0, legacyTargets.rayBSurface.Get()));
-        check(d->SetTexture(0, legacyTargets.rayA.Get()));
-        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
-        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-        float shadowBlur[4] = { .8f / rayWidth, .8f / rayHeight, 0, 0 };
-        check(d->SetPixelShaderConstantF(0, shadowBlur, 1));
-        if (ok) drawQuad(rayWidth, rayHeight);
+        if (ok) drawQuad(desc.Width, desc.Height);
 
         check(d->SetTexture(0, nullptr));
         check(d->SetRenderTarget(0, target.Get()));
         check(d->SetViewport(&fullVp));
         check(d->SetPixelShader(legacyShaders.copy.Get()));
-        check(d->SetTexture(0, legacyTargets.rayB.Get()));
+        check(d->SetTexture(0, legacyTargets.rayA.Get()));
+        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
         check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ZERO));
         check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_SRCCOLOR));
@@ -853,6 +857,29 @@ bool Composite(IDirect3DDevice9* d) {
             check(d->SetPixelShaderConstantF(1, rsize, 1));
             if (ok) drawQuad(desc.Width, desc.Height);
         }
+    }
+
+    // Debug: crosshair at the exact screen position rays/glare use for the
+    // celestial source. Confirms (or disproves) that the source tracking
+    // sits on the real sun/moon disc, independent of manual offset tuning.
+    if (celestialMarkerDebug && legacyShaders.celestialMarker) {
+        check(d->SetViewport(&fullVp));
+        check(d->SetPixelShader(legacyShaders.celestialMarker.Get()));
+        check(d->SetTexture(0, nullptr));
+        bool markerValid = constants[2][0] > -0.5f && constants[2][1] > -0.5f;
+        float markerTarget[4] = { constants[2][0], constants[2][1], markerValid ? 1.f : 0.f, 0 };
+        bool moonDominant = celestialMoonlight > celestialDaylight;
+        float markerColor[4];
+        if (moonDominant) { markerColor[0] = .55f; markerColor[1] = .70f; markerColor[2] = 1.f; markerColor[3] = 1.f; }
+        else { markerColor[0] = 1.f; markerColor[1] = .85f; markerColor[2] = .25f; markerColor[3] = 1.f; }
+        float markerSize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
+        check(d->SetPixelShaderConstantF(0, markerTarget, 1));
+        check(d->SetPixelShaderConstantF(1, markerColor, 1));
+        check(d->SetPixelShaderConstantF(2, markerSize, 1));
+        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+        check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+        check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
+        if (ok) drawQuad(desc.Width, desc.Height);
     }
 
     check(d->SetTexture(0, nullptr));
