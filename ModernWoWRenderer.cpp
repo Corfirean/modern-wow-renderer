@@ -10,6 +10,7 @@
 #include <string>
 #include <mutex>
 #include "WaterDiagnostics.h"
+#include "src/Diagnostics/CelestialDrawDiagnostics.h"
 #include "WaterHighlight.h"
 #include "WaterEffect.h"
 #include "DistanceFog.h"
@@ -150,6 +151,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     watereffect::Present();
     distancefog::Present();
     waterdiag::Present(d);
+    celestialdiag::Present(d);
     renderer::RendererDiagnostics::Instance().OnFrameEnd();
     return originalPresent(d,a,b,w,r);
 }
@@ -158,6 +160,7 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     volume::Reset(d);
     watereffect::Reset(d);
     waterdiag::Reset(d);
+    celestialdiag::Reset(d);
     renderer::ShaderCache::Instance().Clear();
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DepthCapture::Instance().Reset(d);
@@ -265,6 +268,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
+    if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitive",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
@@ -281,6 +285,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
+    if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
@@ -297,6 +302,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
+    if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitiveUP",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
@@ -313,6 +319,7 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     }
     if(!g_drawingOverlay)waterreflection::Prepare(d);
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
+    if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     waterhighlight::Scope tint(d,g_drawingOverlay);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
@@ -467,6 +474,7 @@ void Initialize()
     g_realCreate9Ex = reinterpret_cast<Direct3DCreate9ExFn>(GetProcAddress(g_systemD3D9, "Direct3DCreate9Ex"));
     ReloadSettings();
     waterdiag::Configure(g_basePath);
+    celestialdiag::Configure(g_basePath);
     waterhighlight::Configure(g_basePath);
     watereffect::Configure(g_basePath);
     distancefog::Configure(g_basePath);

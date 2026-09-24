@@ -20,6 +20,7 @@ bin/
 
 # Temporary tests, diagnostics and local analysis files
 WaterDiagnostics/
+CelestialDiagnostics/
 references/
 snapshots/
 *.py
