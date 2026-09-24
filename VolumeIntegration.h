@@ -498,14 +498,28 @@ void BuildShadowCamera() {
     ctx.shadowMapDistance = shadowMapDistance;
 }
 
+// SAFETY GATE - do not flip this via ini. Reported in-game: shadow
+// orientation changing with camera rotation, jagged/crawling silhouettes,
+// and a client crash while this light-space path was exercised. It saves/
+// restores render state and vertex-shader constants around REPLAYING the
+// original WoW draw call into the shadow target - that replay has not been
+// proven state-safe (texture stages/samplers/alpha-ref/vertex declaration
+// are never saved or restored, only a fixed constant-register range and a
+// handful of render states are). Until that is audited and the world-space
+// stability issue is root-caused, this path must stay unreachable even if
+// ShadowMapEnabled=1 is set in GraphicsEffects.ini.
+constexpr bool kAllowExperimentalLightSpaceShadows = false;
+
 inline bool ShouldUpdateShadows()
 {
+    if (!kAllowExperimentalLightSpaceShadows) return false;
     if (!enabled || !active || internal || !shadowsEffectEnabled || !shadowMapEnabled || directionalShadowStrength <= 0)
         return false;
     return (frames % shadowMapUpdateInterval == 0);
 }
 
 template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::DrawClassification& dc, DrawCall&& draw) {
+    if (!kAllowExperimentalLightSpaceShadows) return;
     if (!enabled || !active || internal || !ready || !shadowsEffectEnabled || !shadowMapEnabled || directionalShadowStrength <= 0 || owner != d) return;
     if (!dc.castsShadow) return;
     if (!volumetricCharacterShadows &&
@@ -710,7 +724,17 @@ bool Composite(IDirect3DDevice9* d) {
     // The trace range is also now genuinely local: this is a *contact*
     // shadow (grounding/creases), not a stand-in for directional shadows -
     // long-range occlusion belongs to the light-space shadow map below.
-    if (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
+    // SAFETY GATE - disabled from production regardless of ini. In-game
+    // testing reported the shadow crawling/changing shape with camera
+    // movement and jagged silhouettes even after the render-target fix.
+    // Reconstructing anything beyond a small ground-contact shadow from the
+    // screen-space depth buffer is the wrong tool (no off-screen occluder
+    // data), and this must not stand in for real directional shadows. Kept
+    // as diagnostic-only until re-scoped to ~0.5-2 unit contact range per
+    // the Phase 5 plan, layered on top of WoW's native shadows rather than
+    // replacing them.
+    constexpr bool kAllowScreenSpaceContactShadow = false;
+    if (kAllowScreenSpaceContactShadow && !shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
         renderer::ScopedCpuTimer contactTimer(renderer::PerfStage::ContactShadows);
         check(d->SetPixelShader(legacyShaders.contactShadow.Get()));
         check(d->SetTexture(0, depth.Get()));
