@@ -86,9 +86,17 @@ namespace renderer
         if (FAILED(device->GetTransform(D3DTS_PROJECTION, &proj))) return;
 
         float worldScaleSq = world.m[0][0] * world.m[0][0] + world.m[0][1] * world.m[0][1] + world.m[0][2] * world.m[0][2];
-        bool viewTranslationZero = std::fabs(view.m[3][0]) < 0.02f && std::fabs(view.m[3][1]) < 0.02f && std::fabs(view.m[3][2]) < 0.02f;
+        // Widened from the original (0.02 / [6,20]) after in-game testing:
+        // near screen edges the billboard's VIEW-space offset shifts more
+        // of its magnitude into x/y (wider viewing angle from forward),
+        // which can push z below the old lower bound and nudge the
+        // translation-zero check for the sun pattern outside its old
+        // epsilon. The other three gates (fixed-function, alphaTest,
+        // texture bound, plus the WORLD-scale shape) already carry the
+        // real discriminating power, so these can afford to be generous.
+        bool viewTranslationZero = std::fabs(view.m[3][0]) < 0.05f && std::fabs(view.m[3][1]) < 0.05f && std::fabs(view.m[3][2]) < 0.05f;
         bool worldIsLargeScale = worldScaleSq >= 4.0f;
-        bool worldIsIdentityScale = std::fabs(worldScaleSq - 1.0f) < 0.1f;
+        bool worldIsIdentityScale = std::fabs(worldScaleSq - 1.0f) < 0.15f;
         float viewTransZ = view.m[3][2];
 
         // Camera-space position of the billboard's local origin: transform
@@ -108,7 +116,7 @@ namespace renderer
         {
             UpdateBody(m_sun, cx, cy, cz, view, proj, m_frameIndex);
         }
-        else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 6.0f && viewTransZ < 20.0f)
+        else if (!viewTranslationZero && worldIsIdentityScale && viewTransZ > 1.0f && viewTransZ < 40.0f)
         {
             UpdateBody(m_moon, cx, cy, cz, view, proj, m_frameIndex);
         }
