@@ -22,6 +22,7 @@ std::atomic<bool> enabled{false};
 std::mutex mutex;
 bool active=false, keyDown=false;
 unsigned draws=0, candidates=0, maxDraws=4096;
+unsigned presentsSinceStart=0, totalDrawCallsSeen=0;
 std::filesystem::path root, folder;
 std::ofstream log;
 std::set<std::string> dumped;
@@ -33,7 +34,12 @@ void Configure(const std::wstring& base) {
     root=std::filesystem::path(base)/L"CelestialDiagnostics";
 }
 void Finish(const char* why) {
-    if(active) { log<<"END reason="<<why<<" draws="<<draws<<" candidates="<<candidates<<'\n'; log.close(); }
+    if(active) {
+        log<<"END reason="<<why<<" draws="<<draws<<" candidates="<<candidates
+           <<" presents_since_start="<<presentsSinceStart
+           <<" total_draw_calls_seen_this_session="<<totalDrawCallsSeen<<'\n';
+        log.close();
+    }
     active=false; target=nullptr;
 }
 void Start(IDirect3DDevice9* d) {
@@ -44,8 +50,8 @@ void Start(IDirect3DDevice9* d) {
     std::filesystem::create_directories(folder);
     log.open(folder/L"celestial_candidates.txt");
     if(!log) { enabled=false; return; }
-    draws=0; candidates=0; dumped.clear(); target=d; active=true;
-    log<<"celestial draw capture, ONE frame, F9 to start.\n";
+    draws=0; candidates=0; presentsSinceStart=0; dumped.clear(); target=d; active=true;
+    log<<"celestial draw capture, F9 to start.\n";
     log<<"CANDIDATE=1 heuristic: primitives<=8, alphaBlend=1, zWrite=0. A filter to make this readable,\n";
     log<<"not a verdict - check the flagged draws by eye (texture dims/hash, VSF values) before trusting one.\n";
 }
@@ -53,7 +59,15 @@ void Present(IDirect3DDevice9* d) noexcept {
     if(!enabled.load(std::memory_order_relaxed)) return;
     try {
         std::lock_guard lock(mutex);
-        if(active && target==d) Finish("present");
+        if(active && target==d) {
+            ++presentsSinceStart;
+            // Finish once we've actually captured something from at least one
+            // full Present-to-Present interval, OR bail out after a generous
+            // number of empty frames so a capture can never hang silently
+            // forever if draws truly aren't reaching this hook for some reason.
+            if(draws>0 && presentsSinceStart>=2) Finish("present");
+            else if(presentsSinceStart>=180) Finish("timeout-no-draws");
+        }
         const bool down=(GetAsyncKeyState(VK_F9)&0x8000)!=0;
         DWORD pid=0; GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!keyDown&&pid==GetCurrentProcessId()&&!active) Start(d);
@@ -87,6 +101,7 @@ void Draw(IDirect3DDevice9* d,const char* kind,D3DPRIMITIVETYPE type,UINT count)
     if(!enabled.load(std::memory_order_relaxed)) return;
     try {
         std::lock_guard lock(mutex);
+        ++totalDrawCallsSeen; // unconditional - lets Finish() report whether Draw() is even reached
         if(!active||target!=d) return;
         if(draws>=maxDraws) { Finish("draw-limit"); return; }
 
