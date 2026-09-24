@@ -12,6 +12,7 @@
 #include "src/D3D9/ScopedRenderState.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
+#include "src/Diagnostics/CelestialMemoryProbe.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -114,6 +115,9 @@ float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
 bool localLightDebug = false;
 bool celestialMarkerDebug = false;
+bool celestialMemoryProbeDebug = false;
+std::wstring celestialProbeLogPath;
+unsigned celestialProbeLogCounter = 0;
 unsigned frames = 0, applied = 0, depthFrames = 0, cameraFrames = 0, shadowDraws = 0, shadowFrameDraws = 0;
 std::wstring logPath;
 std::wstring mainIni, tuningIni;
@@ -285,6 +289,11 @@ void ReloadTuning() {
     shaftDebug = ReadTuning(L"ShaftDebugMask", 0) != 0;
     localLightDebug = ReadTuning(L"LocalLightDebugMask", 0) != 0;
     celestialMarkerDebug = ReadTuning(L"DebugCelestialMarker", 0) != 0;
+    // Read-only comparison of the current v[24]-projection marker (RED)
+    // against two candidate directions read from client-process globals
+    // (GREEN=sun candidate, CYAN=moon candidate) per CelestialMemoryProbe.h.
+    // Off by default; never affects rendering/rays, debug overlay only.
+    celestialMemoryProbeDebug = ReadTuning(L"DebugCelestialMemoryProbe", 0) != 0;
 
     renderer::PerformanceProfiler::Instance().SetGpuProfilingEnabled(ReadTuning(L"GpuProfilingEnabled", 0) != 0);
 
@@ -298,6 +307,7 @@ void Configure(const std::wstring& base) {
     mainIni = base + L"ModernWoWRenderer.ini";
     tuningIni = base + L"GraphicsEffects.ini";
     logPath = base + L"VolumeEffects.log";
+    celestialProbeLogPath = base + L"CelestialProbe.log";
     renderer::PerformanceProfiler::Instance().SetLogPath(logPath);
     renderer::DirectionalVolumetricLighting::Instance().Configure(base);
     enabled = GetPrivateProfileIntW(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
@@ -885,27 +895,84 @@ bool Composite(IDirect3DDevice9* d) {
         }
     }
 
-    // Debug: crosshair at the exact screen position rays/glare use for the
-    // celestial source. Confirms (or disproves) that the source tracking
-    // sits on the real sun/moon disc, independent of manual offset tuning.
-    if (celestialMarkerDebug && legacyShaders.celestialMarker) {
+    // Debug: crosshair(s) at the screen position(s) various sun/moon source
+    // hypotheses land on. Confirms (or disproves) that a given source
+    // tracking method sits on the real sun/moon disc.
+    if ((celestialMarkerDebug || celestialMemoryProbeDebug) && legacyShaders.celestialMarker) {
         check(d->SetViewport(&fullVp));
         check(d->SetPixelShader(legacyShaders.celestialMarker.Get()));
         check(d->SetTexture(0, nullptr));
-        bool markerValid = constants[2][0] > -0.5f && constants[2][1] > -0.5f;
-        float markerTarget[4] = { constants[2][0], constants[2][1], markerValid ? 1.f : 0.f, 0 };
-        bool moonDominant = celestialMoonlight > celestialDaylight;
-        float markerColor[4];
-        if (moonDominant) { markerColor[0] = .55f; markerColor[1] = .70f; markerColor[2] = 1.f; markerColor[3] = 1.f; }
-        else { markerColor[0] = 1.f; markerColor[1] = .85f; markerColor[2] = .25f; markerColor[3] = 1.f; }
         float markerSize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
-        check(d->SetPixelShaderConstantF(0, markerTarget, 1));
-        check(d->SetPixelShaderConstantF(1, markerColor, 1));
         check(d->SetPixelShaderConstantF(2, markerSize, 1));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
         check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
         check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
-        if (ok) drawQuad(desc.Width, desc.Height);
+
+        auto drawMarker = [&](float x, float y, bool valid, float r, float g, float b) {
+            float markerTarget[4] = { x, y, valid ? 1.f : 0.f, 0 };
+            float markerColor[4] = { r, g, b, 1.f };
+            check(d->SetPixelShaderConstantF(0, markerTarget, 1));
+            check(d->SetPixelShaderConstantF(1, markerColor, 1));
+            if (ok) drawQuad(desc.Width, desc.Height);
+        };
+
+        // RED (or the original yellow/blue when the memory probe overlay is
+        // off): the current v[24]-projection marker used by rays/glare.
+        bool legacyValid = constants[2][0] > -0.5f && constants[2][1] > -0.5f;
+        if (celestialMemoryProbeDebug) {
+            drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .15f, .15f);
+        } else {
+            bool moonDominant = celestialMoonlight > celestialDaylight;
+            if (moonDominant) drawMarker(constants[2][0], constants[2][1], legacyValid, .55f, .70f, 1.f);
+            else drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .85f, .25f);
+        }
+
+        // GREEN / CYAN: candidates read from CelestialMemoryProbe (see that
+        // file for exactly what is and isn't verified). Projected with the
+        // same true-perspective formula as the legacy path, no offset/scale.
+        if (celestialMemoryProbeDebug) {
+            renderer::CelestialProbeSample probe = renderer::CelestialMemoryProbe::Instance().Sample();
+
+            auto projectAndDraw = [&](bool valid, const renderer::Vec3& toLightWorld, float r, float g, float b) {
+                if (!valid) { drawMarker(-2.f, -2.f, false, r, g, b); return; }
+                float vx = toLightWorld.x * constants[4][0] + toLightWorld.y * constants[5][0] + toLightWorld.z * constants[6][0];
+                float vy = toLightWorld.x * constants[4][1] + toLightWorld.y * constants[5][1] + toLightWorld.z * constants[6][1];
+                float vz = toLightWorld.x * constants[4][2] + toLightWorld.y * constants[5][2] + toLightWorld.z * constants[6][2];
+                bool inFront = vz > 0.02f;
+                float sx = -2.f, sy = -2.f;
+                if (inFront) {
+                    float invZ = 1.f / vz;
+                    sx = 0.5f + 0.5f * vx * invZ * constants[0][2];
+                    sy = 0.5f - 0.5f * vy * invZ * constants[0][3];
+                }
+                drawMarker(sx, sy, inFront, r, g, b);
+            };
+
+            projectAndDraw(probe.sunCandidateValid, probe.sunToLightWorld, .25f, 1.f, .35f);
+            projectAndDraw(probe.moonCandidateValid, probe.moonToLightWorld, .25f, 1.f, 1.f);
+
+            if (++celestialProbeLogCounter >= 60) {
+                celestialProbeLogCounter = 0;
+                char msg[512];
+                if (!probe.addressesReadable) {
+                    sprintf_s(msg, "celestial-probe: addresses not readable (module layout may not match)");
+                } else if (!probe.valuesPlausible) {
+                    sprintf_s(msg, "celestial-probe: read ok but neither candidate direction was plausible; day=%.4f", probe.day);
+                } else {
+                    sprintf_s(msg,
+                        "celestial-probe: day=%.4f sunRaw=(%.2f %.2f %.2f) moonRaw=(%.2f %.2f %.2f) ref=(%.2f %.2f %.2f) "
+                        "sunToLight=(%.3f %.3f %.3f) valid=%d moonToLight=(%.3f %.3f %.3f) valid=%d legacy_v24_screen=(%.3f %.3f)",
+                        probe.day,
+                        probe.sunRaw.x, probe.sunRaw.y, probe.sunRaw.z,
+                        probe.moonRaw.x, probe.moonRaw.y, probe.moonRaw.z,
+                        probe.referenceRaw.x, probe.referenceRaw.y, probe.referenceRaw.z,
+                        probe.sunToLightWorld.x, probe.sunToLightWorld.y, probe.sunToLightWorld.z, probe.sunCandidateValid ? 1 : 0,
+                        probe.moonToLightWorld.x, probe.moonToLightWorld.y, probe.moonToLightWorld.z, probe.moonCandidateValid ? 1 : 0,
+                        constants[2][0], constants[2][1]);
+                }
+                std::ofstream(std::filesystem::path(celestialProbeLogPath), std::ios::app) << msg << '\n';
+            }
+        }
     }
 
     check(d->SetTexture(0, nullptr));

@@ -57,7 +57,12 @@ inline std::vector<Item> items={
 
  // === DEBUG (developer-only: unverified / known-broken features) ===
  {KIND_HEADER,nullptr,nullptr,"--- DEBUG - DO NOT USE IN PRODUCTION ---",0,0,0,0},
- {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMarker","SUN/MOON MARKER",0,1,1,0},
+ {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMarker","SUN/MOON MARKER (RED=v24)",0,1,1,0},
+ // RED=legacy v[24] projection, GREEN=memory-probe sun candidate,
+ // CYAN=memory-probe moon candidate. See CelestialMemoryProbe.h - the
+ // addresses/selection logic are an unverified third-party-derived
+ // hypothesis, this toggle exists to visually prove or disprove them.
+ {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMemoryProbe","+ MEMORY PROBE (GREEN/CYAN)",0,1,1,0},
  // Hidden fallback only: the real sun/moon screen position now comes from
  // the light direction + projection, not from these. Leave at neutral
  // (100/0/0) unless the marker above proves the projection itself is off.
