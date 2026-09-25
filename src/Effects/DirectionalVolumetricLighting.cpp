@@ -20,7 +20,22 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float d1=tex2D(fullDepth,uv+float2( texel.x,-texel.y)).r;
  float d2=tex2D(fullDepth,uv+float2(-texel.x, texel.y)).r;
  float d3=tex2D(fullDepth,uv+float2( texel.x, texel.y)).r;
- return min(min(d0,d1),min(d2,d3));
+ // Used to be min() of the 4 taps (bias toward the nearest, to keep thin
+ // foreground objects from bleeding fog past them at low res). Right next
+ // to any strong depth discontinuity - a cliff or coastline against open
+ // water behind it - that systematically hands a whole neighbourhood of
+ // low-res texels the NEAR (cliff) depth instead of the far water behind
+ // it. Every one of those texels then integrates fog as if the ray only
+ // reaches the cliff, and the later bilateral upsample can't find a good
+ // depth match for the real (far) water pixels there either, so it falls
+ // back to blending those already-wrong near-biased neighbours - producing
+ // one flat, uniform, hard-edged patch of wrong fog across open water far
+ // beyond the actual discontinuity (confirmed via AtmosphereDebugMode=9:
+ // the bad flat patch is already present pre-upsample, anchored exactly on
+ // a cliff silhouette). Averaging removes the systematic bias; the minor
+ // cost is slightly softer edges around genuinely thin foreground objects
+ // at this already-low resolution, which is a much smaller problem.
+ return (d0+d1+d2+d3)*.25;
 })HLSL";
 
 const char* kIntegrateSource = R"HLSL(
