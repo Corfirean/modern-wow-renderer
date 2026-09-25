@@ -85,7 +85,16 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    float hd=heightTuning.z*exp(-clamp((p.z-heightTuning.x)*heightTuning.y,-3,8));
    float bank=noiseAt(p);
    float md=mistTuning.z*exp(-clamp((p.z-mistTuning.x)*mistTuning.y,-2,10))*lerp(.35,1.35,saturate(bank));
-   float n=lerp(1,bank,mistTuning.w); float density=max(0,(aerial+hd+md)*n);
+   // Height fog/mist have no distance term - only aerial haze fades in with
+   // t above. Both height layers are defined relative to CAMERA height
+   // (cameraPos.z + offset), so they sit at their peak density right next
+   // to the camera by construction, not just far away. On a boat/dock that
+   // peak lands almost exactly at the water surface a few units out, which
+   // is what was washing nearby water back out after the absorption fix.
+   // A short near-camera fade keeps the far-distance look (which was fine)
+   // and stops the layer from slamming what's immediately next to you.
+   float nearFade=smoothstep(0.0,10.0,t);
+   float n=lerp(1,bank,mistTuning.w); float density=max(0,(aerial+(hd+md)*nearFade)*n);
    float od=density*directExtinction.w*stepLength; float segment=1-exp(-od);
    float3 amb=ambientAerial.rgb*segment; float3 dir=directExtinction.rgb*phase*celestial.w*segment;
    ambientSum+=T*amb; directSum+=T*dir; T*=exp(-od); optical+=od;

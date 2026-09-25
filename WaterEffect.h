@@ -230,10 +230,21 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     // 4. Celestial reflection path & shore/crest foam
     float pathEnergy=saturate(celestialPath*controls.w*.85);
     rgb+=max(sheenColor,float3(.20,.22,.24))*pathEnergy;
+    // Broad, warm, roughly circular glow where a CALM mirror (the flat
+    // surface normal `n`, not the wave-perturbed `wave`) would bounce the
+    // sun/moon straight at the camera. The sparkle above is high-frequency
+    // wave-facet glitter - correct, but it reads as scattered texture, not
+    // the coherent warm disc from the reference shots. This is that disc:
+    // same idea as the sparkle (mirror reflection of the light direction)
+    // but evaluated on the smooth normal so it doesn't break up into noise.
+    float haloAlign=saturate(dot(reflect(-v,n),l));
+    float halo=pow(haloAlign,22)*foreverStyle.y*ndl;
+    float3 warmTint=lerp(max(lightColor.rgb,.15),float3(1,.78,.5),.35);
+    rgb+=warmTint*halo*1.6;
     float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
     float foamAmount=(shore+waveFoam*foreverStyle.w)*crest*waterStyle.z;
     rgb+=float3(.42,.48,.43)*foamAmount;
-    if(flowControl.z>1.5)return float4(saturate(pathEnergy*3).xxx,1);
+    if(flowControl.z>1.5)return float4(saturate((pathEnergy+halo)*3).xxx,1);
     if(flowControl.z>.5)return float4(1,0,1,1);
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
