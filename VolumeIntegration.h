@@ -95,11 +95,16 @@ auto& depth = resources.depth; auto& surface = resources.surface;
 auto& originalDepth = resources.originalDepth; auto& target = resources.target;
 
 ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, localLightBytecode, radialBytecode, contactShadowBytecode, postProcessBytecode, rayCompositeBytecode, celestialMarkerBytecode;
-float constants[13][4]{};
+float constants[14][4]{};
 uint64_t cameraCaptureShaderHash = 0;
 float capturedViewTranslation[3]{};
 bool capturedViewValid = false;
 float baseHeight = 60, density = .004f, falloff = .07f, strength = 2.6f, moonStrength = .35f, variation = 1.35f, lowLayer = .35f, raySoftness = 5.f, rayFalloff = 2.f, fogWash = .45f, sunVerticalScale = .4f, sunOffsetX = 0, sunOffsetY = 0, localLightStrength = .8f, localLightThreshold = .25f, sunSourceThreshold = .60f;
+// Second, independent height-fog layer: low, dense ground mist hugging the
+// terrain, on top of the broader distance haze (`density`/`falloff`/
+// `baseHeight` above). Combined by summing optical depth - physically the
+// right way to stack two independent scattering media along the same ray.
+float groundMistHeight = 4.f, groundMistFalloff = .35f, groundMistDensity = .008f;
 float contactShadowStrength = .28f, contactShadowRadius = 10.f, contactShadowMaxDistance = 6.f, directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f, localLightRadius = 140.f;
 UINT configuredShadowMapSize = 1024;
 int brightnessPercent = 0, contrastPercent = 100, gammaPercent = 100, sharpnessPercent = 35;
@@ -259,6 +264,11 @@ void ReloadTuning() {
     variation = std::clamp(ReadTuning(L"VariationPercent", 135), 0, 250) * .01f;
     moonStrength = std::clamp(ReadTuning(L"MoonShaftPercent", 35), 0, 100) * .01f;
     lowLayer = std::clamp(ReadTuning(L"LowLayerPercent", 35), 0, 150) * .01f;
+    // Ground mist: low, dense, tightly height-limited - a second fog layer
+    // stacked on top of the broad distance haze above, not a replacement.
+    groundMistHeight = float(std::clamp(ReadTuning(L"GroundMistHeight", 4), -20, 60));
+    groundMistFalloff = std::clamp(ReadTuning(L"GroundMistFalloffPermille", 350), 20, 2000) * .001f;
+    groundMistDensity = std::clamp(ReadTuning(L"GroundMistDensityPermille", 8), 0, 40) * .001f;
     raySoftness = float(std::clamp(ReadTuning(L"ShaftSoftnessPixels", 5), 0, 16));
     rayFalloff = std::clamp(ReadTuning(L"ShaftFalloffPercent", 200), 50, 500) * .01f;
     fogWash = std::clamp(ReadTuning(L"FogWashPercent", 35), 0, 100) * .01f;
@@ -437,6 +447,11 @@ bool CaptureCamera(IDirect3DDevice9* d) {
         frameCtx.depthTexture = resources.depth.Get();
         frameCtx.depthSurface = resources.surface.Get();
         frameCtx.depthAvailable = (resources.depth != nullptr);
+        // c13: second height-fog layer (ground mist) - x=height,y=falloff,z=density
+        constants[13][0] = groundMistHeight;
+        constants[13][1] = groundMistFalloff;
+        constants[13][2] = groundMistDensity;
+        constants[13][3] = 0.f;
     }
     return ok;
 }
@@ -777,7 +792,7 @@ bool Composite(IDirect3DDevice9* d) {
 
     D3DVIEWPORT9 fullVp{ 0, 0, desc.Width, desc.Height, 0, 1 };
     check(d->SetViewport(&fullVp));
-    check(d->SetPixelShaderConstantF(0, constants[0], 13));
+    check(d->SetPixelShaderConstantF(0, constants[0], 14));
 
     // Screen-space contact shadows.
     // Rendered DIRECTLY onto the bound scene target (`target`, already the
@@ -828,7 +843,7 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetPixelShader(legacyShaders.volume.Get()));
         check(d->SetTexture(1, depth.Get()));
         check(d->SetTexture(2, resources.noise.Get()));
-        check(d->SetPixelShaderConstantF(0, constants[0], 13));
+        check(d->SetPixelShaderConstantF(0, constants[0], 14));
     }
 
     // Atmospheric Height Fog
@@ -859,7 +874,7 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetTexture(0, legacyTargets.scene.Get()));
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-        check(d->SetPixelShaderConstantF(0, constants[0], 13));
+        check(d->SetPixelShaderConstantF(0, constants[0], 14));
         float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f * sunGlareStrength, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
@@ -899,6 +914,7 @@ bool Composite(IDirect3DDevice9* d) {
 
         IDirect3DTexture9* finalRays = legacyTargets.rayB.Get();
         if (!shaftDebug && temporalShaftsEnabled && legacyTargets.rayHistory && legacyTargets.rayHistorySurface) {
+            auto& tempCtx = renderer::FrameContext::Current();
             check(d->SetRenderTarget(0, legacyTargets.rayASurface.Get()));
             check(d->SetPixelShader(legacyShaders.temporal.Get()));
             check(d->SetTexture(0, legacyTargets.rayB.Get()));
@@ -907,12 +923,30 @@ bool Composite(IDirect3DDevice9* d) {
             check(d->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
             check(d->SetSamplerState(1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
             check(d->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
+            check(d->SetTexture(2, depth.Get()));
+            check(d->SetSamplerState(2, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+            check(d->SetSamplerState(2, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+            check(d->SetSamplerState(2, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(2, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
             float temporal[4] = { 1.f / rayWidth, 1.f / rayHeight, .72f, legacyTargets.historyValid ? 1.f : 0.f };
             check(d->SetPixelShaderConstantF(0, temporal, 1));
+            // Reuse this frame's already-captured projection/inverse-view/
+            // camera-position (constants[0], constants[4..7]) for world-
+            // position reconstruction, plus LAST frame's raw view matrix for
+            // the actual reprojection - see volumeTemporalPixelSource.
+            check(d->SetPixelShaderConstantF(1, constants[0], 1));
+            check(d->SetPixelShaderConstantF(2, constants[4], 4));
+            float prevView[4][4];
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col)
+                    prevView[row][col] = tempCtx.previousViewRaw.m[row][col];
+            prevView[0][3] = tempCtx.previousViewValid ? 1.f : 0.f;
+            check(d->SetPixelShaderConstantF(6, prevView[0], 4));
             if (ok) drawQuad(rayWidth, rayHeight);
 
             check(d->SetTexture(0, nullptr));
             check(d->SetTexture(1, nullptr));
+            check(d->SetTexture(2, nullptr));
             check(d->StretchRect(legacyTargets.rayASurface.Get(), nullptr, legacyTargets.rayHistorySurface.Get(), nullptr, D3DTEXF_NONE));
             legacyTargets.historyValid = ok;
             finalRays = legacyTargets.rayA.Get();

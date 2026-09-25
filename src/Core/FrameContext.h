@@ -40,6 +40,22 @@ namespace renderer
         float projUnpack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         float depthMaxZ = 1.0f;
 
+        // Raw forward (world->view) transform, rows exactly as the game's
+        // vertex shader constants store them (row 3 = translation; same
+        // row-vector convention used throughout this codebase). CameraCapture
+        // swaps viewRaw into previousViewRaw before overwriting it with each
+        // new frame's value, so by the time this frame's rendering reads
+        // previousViewRaw it holds LAST frame's transform - used for ray/fog
+        // temporal reprojection: transforming this frame's reconstructed
+        // world position by previousViewRaw (+ the projection, which is
+        // assumed FOV-stable frame to frame) gives where that point
+        // appeared on screen last frame, so history is sampled at the
+        // correct motion-compensated UV instead of naively at the same UV.
+        Matrix4 viewRaw;
+        bool viewRawValid = false;
+        Matrix4 previousViewRaw;
+        bool previousViewValid = false;
+
         // Directional shadow map data
         Matrix4 shadowMatrix;
         Matrix4 viewToShadowMatrix;

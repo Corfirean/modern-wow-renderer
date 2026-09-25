@@ -23,6 +23,8 @@ float4 lightDirection:register(c10);
 float4 directColor:register(c11);
 // xy=1/render size,z=softness in pixels,w=radial falloff
 float4 rayTuning:register(c12);
+// Second, independent height-fog layer (ground mist): x=height,y=falloff,z=density
+float4 groundMist:register(c13);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     float z=raw>=.9999 ? medium.w : projection.y/(raw/max(sun.w,.001)-projection.x);
@@ -69,6 +71,16 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float eCam=exp(-clamp(hCam*medium.y,-8.0,8.0));
     float optDepth=medium.z*rayLen*eCam*factor;
     optDepth=max(optDepth,0.0);
+
+    // Second layer: low, dense ground mist. Same analytic integral, stacked
+    // on top by summing optical depth (the physically correct way to
+    // combine two independent scattering media along one ray) rather than
+    // replacing the broader haze above.
+    float hCamMist=origin.z-groundMist.x;
+    float uMist=clamp(groundMist.y*dz,-12.0,12.0);
+    float factorMist=(abs(uMist)<0.02) ? (1.0-0.5*uMist+(1.0/6.0)*uMist*uMist) : ((1.0-exp(-uMist))/uMist);
+    float eCamMist=exp(-clamp(hCamMist*groundMist.y,-8.0,8.0));
+    optDepth+=max(groundMist.z*rayLen*eCamMist*factorMist,0.0);
 
     // Atmospheric rolling noise modulation
     float2 wind=float2(detail.x*.0021,-detail.x*.0013);
@@ -125,24 +137,85 @@ sampler2D image:register(s0);
 float4 main(float2 uv:TEXCOORD0):COLOR0 { return tex2D(image,uv); }
 )HLSL";
 
-// Reprojects no geometry, so history is aggressively clipped to the current
-// four-neighbour envelope. This keeps shafts calm under foliage without the
-// long camera-motion trails of an unconstrained temporal average.
+// Real motion-compensated reprojection: reconstructs this frame's world
+// position from full-res depth, transforms it by LAST frame's view matrix
+// (+ this frame's projection, assumed FOV-stable across one frame) to find
+// where that same world point sat on screen last frame, and samples
+// history there instead of at the naive same UV. Previously this shader
+// just clamped history sampled at the current UV to the current frame's
+// local neighborhood - correct for a static camera, but under camera
+// motion that UV corresponds to a DIFFERENT world point each frame, so the
+// old approach was really just heavy smoothing, not reprojection (it
+// worked only because the neighborhood clamp kept it from diverging
+// badly). Falls back to that same-UV clamp for sky pixels (depth==far
+// plane), where a stable reprojection target doesn't exist.
 inline const char* volumeTemporalPixelSource=R"HLSL(
 sampler2D currentFrame:register(s0);
 sampler2D historyFrame:register(s1);
-// xy=one texel, z=history weight, w=history valid
+sampler2D depthMap:register(s2);
+// xy=one low-res texel, z=history weight, w=history valid
 float4 temporal:register(c0);
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float4 c=tex2D(currentFrame,uv);
-    if(temporal.w<.5)return c;
+// x=P22,y=P32,z=P00,w=P11 (this frame's projection)
+float4 projUnpack:register(c1);
+float4 invView0:register(c2);
+float4 invView1:register(c3);
+float4 invView2:register(c4);
+// xyz=camera world position (this frame)
+float4 cameraPos:register(c5);
+// LAST frame's raw forward (world->view) matrix rows (row-vector
+// convention: pos_view = pos_world * M, row3 = translation)
+float4 prevView0:register(c6);
+float4 prevView1:register(c7);
+float4 prevView2:register(c8);
+float4 prevView3:register(c9);
+
+float4 clampedHistory(float2 uv,float4 c) {
     float4 a=tex2D(currentFrame,uv+float2(temporal.x,0));
     float4 b=tex2D(currentFrame,uv-float2(temporal.x,0));
     float4 d=tex2D(currentFrame,uv+float2(0,temporal.y));
     float4 e=tex2D(currentFrame,uv-float2(0,temporal.y));
     float4 lo=min(c,min(min(a,b),min(d,e)));
     float4 hi=max(c,max(max(a,b),max(d,e)));
-    float4 h=clamp(tex2D(historyFrame,uv),lo,hi);
+    return clamp(tex2D(historyFrame,uv),lo,hi);
+}
+
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float4 c=tex2D(currentFrame,uv);
+    if(temporal.w<.5)return c;
+
+    float raw=tex2D(depthMap,uv).r;
+    if(raw>=.9999) {
+        // Sky: no stable world point to reproject - same-UV clamp only.
+        return lerp(c,clampedHistory(uv,c),temporal.z);
+    }
+
+    float z=projUnpack.y/(raw-projUnpack.x);
+    float3 viewPos=float3((uv.x*2-1)/projUnpack.z,(1-uv.y*2)/projUnpack.w,1)*z;
+    float3 worldPos=cameraPos.xyz
+        +viewPos.x*invView0.xyz+viewPos.y*invView1.xyz+viewPos.z*invView2.xyz;
+
+    float3 prevViewPos=float3(
+        dot(worldPos,prevView0.xyz)+prevView3.x,
+        dot(worldPos,prevView1.xyz)+prevView3.y,
+        dot(worldPos,prevView2.xyz)+prevView3.z);
+
+    if(prevViewPos.z<=0.05) return lerp(c,clampedHistory(uv,c),temporal.z);
+
+    float2 prevUv=float2(
+        0.5+0.5*(prevViewPos.x/prevViewPos.z)*projUnpack.z,
+        0.5-0.5*(prevViewPos.y/prevViewPos.z)*projUnpack.w);
+
+    // Out of bounds (off-screen last frame, camera cut/teleport, or no
+    // valid previous frame at all): no reprojection target - same-UV clamp.
+    if(prevView0.w<0.5||prevUv.x<0.0||prevUv.x>1.0||prevUv.y<0.0||prevUv.y>1.0)
+        return lerp(c,clampedHistory(uv,c),temporal.z);
+
+    float4 lo=c,hi=c;
+    float4 a=tex2D(currentFrame,uv+float2(temporal.x,0)); lo=min(lo,a); hi=max(hi,a);
+    float4 b=tex2D(currentFrame,uv-float2(temporal.x,0)); lo=min(lo,b); hi=max(hi,b);
+    float4 d=tex2D(currentFrame,uv+float2(0,temporal.y)); lo=min(lo,d); hi=max(hi,d);
+    float4 e=tex2D(currentFrame,uv-float2(0,temporal.y)); lo=min(lo,e); hi=max(hi,e);
+    float4 h=clamp(tex2D(historyFrame,prevUv),lo,hi);
     return lerp(c,h,temporal.z);
 }
 )HLSL";

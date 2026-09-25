@@ -23,6 +23,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
  {KIND_SLIDER,L"Atmosphere",L"BaseHeight","FOG BASE HEIGHT",-50,200,2,28},
  {KIND_SLIDER,L"Atmosphere",L"FogWashPercent","FOG WASH",0,100,2,35},
+ {KIND_SLIDER,L"Atmosphere",L"GroundMistDensityPermille","GROUND MIST",0,40,1,8},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},

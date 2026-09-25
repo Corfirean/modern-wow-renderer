@@ -56,6 +56,17 @@ namespace renderer
             }
         }
 
+        // Swap BEFORE overwriting: whatever viewRaw held (last successful
+        // capture's forward view) becomes previousViewRaw for this frame's
+        // temporal reprojection use; then this frame's raw rows are stored
+        // for the same swap to happen next frame.
+        frameContext.previousViewRaw = frameContext.viewRaw;
+        frameContext.previousViewValid = frameContext.viewRawValid;
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 4; ++col)
+                frameContext.viewRaw.m[row][col] = v[row][col];
+        frameContext.viewRawValid = true;
+
         memset(outConstants, 0, sizeof(float) * 13 * 4);
 
         // c0: Projection unpacking factors [P22, P32, P00, P11]
