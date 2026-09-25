@@ -887,7 +887,14 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
         check(d->SetRenderTarget(0, legacyTargets.rayBSurface.Get()));
         check(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1, 0));
-        float radial[4] = { constants[2][0], constants[2][1], .78f, .958f };
+        // Reach/decay were hardcoded (.78/.958) - ShaftFalloffPercent (the
+        // "RAY LENGTH" knob, documented as "higher = shorter rays") was
+        // read into rayFalloff but never actually consumed by this pass.
+        // Wired up now: higher rayFalloff -> faster per-sample decay ->
+        // visibly shorter rays, matching what the slider already claimed.
+        float radialReach = .88f;
+        float radialDecay = pow(.975f, std::max(rayFalloff, .3f));
+        float radial[4] = { constants[2][0], constants[2][1], radialReach, radialDecay };
         check(d->SetPixelShaderConstantF(0, radial, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
 

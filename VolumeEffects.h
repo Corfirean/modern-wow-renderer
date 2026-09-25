@@ -303,7 +303,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         weightSum+=weight;
         illumination*=radial.w;
     }
-    light.rgb=light.rgb/max(weightSum,.001)*1.1;
+    light.rgb=light.rgb/max(weightSum,.001);
+    // Contrast lift: a plain weighted average reads as a soft, low-contrast
+    // glow (the "blob" look) because most of the sampled path is usually
+    // empty sky diluting the mean. A sub-1 power pulls dim/mid values up
+    // faster than bright ones, so partial-occlusion streaks (branches,
+    // rooflines) read as more defined beams instead of a uniform wash.
+    light.rgb=pow(saturate(light.rgb),0.72)*1.2;
     light.a=1;
     return light;
 }
