@@ -663,15 +663,22 @@ bool Composite(IDirect3DDevice9* d) {
     {
         const renderer::CelestialBody& sun = renderer::CelestialTracker::Instance().Sun();
         const renderer::CelestialBody& moon = renderer::CelestialTracker::Instance().Moon();
-        bool useSun = sun.visible && celestialDaylight > 0.02f;
+        // Gating strength on celestialDaylight (the OLD, separate v[26]-
+        // luminance/tint heuristic) was a leftover mistake: it can read
+        // near-zero in perfectly sunny scenes with a cool/blue-tinted
+        // direct light color (this server's skies lean that way), silently
+        // killing rays even though CelestialTracker has ALREADY confirmed
+        // the real sun disc is drawn and visible this frame - a marker
+        // sitting correctly on the sun with no rays was exactly that bug.
+        // Visibility from the actual draw call is the ground truth now;
+        // it doesn't need a second, weaker opinion to also say yes.
+        bool useSun = sun.visible;
         bool useMoon = !useSun && moon.visible;
         const renderer::CelestialBody* body = useSun ? &sun : (useMoon ? &moon : nullptr);
         if (body) {
             constants[2][0] = body->screenX;
             constants[2][1] = body->screenY;
-            constants[2][2] = useSun
-                ? strength * celestialDaylight
-                : strength * moonStrength * celestialMoonlight;
+            constants[2][2] = useSun ? strength : strength * moonStrength;
             constants[10][0] = body->viewSpaceDirection.x;
             constants[10][1] = body->viewSpaceDirection.y;
             constants[10][2] = body->viewSpaceDirection.z;
