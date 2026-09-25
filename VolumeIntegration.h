@@ -84,11 +84,13 @@ LegacyVolumeShaders legacyShaders;
 LegacyFrameTargets legacyTargets;
 
 struct FrameResources {
-    ComPtr<IDirect3DTexture9> depth, noise, shadowDepth, shadowColor;
-    ComPtr<IDirect3DSurface9> surface, originalDepth, target, shadowDepthSurface, shadowColorSurface;
+    ComPtr<IDirect3DTexture9> depth, noise, shadowDepth, shadowColor, waterMask;
+    ComPtr<IDirect3DSurface9> surface, originalDepth, target, shadowDepthSurface, shadowColorSurface, waterMaskSurface;
     IDirect3DDevice9* noiseOwner = nullptr;
     IDirect3DDevice9* shadowOwner = nullptr;
     UINT shadowSize = 0;
+    IDirect3DDevice9* waterMaskOwner = nullptr;
+    UINT waterMaskWidth = 0, waterMaskHeight = 0;
 };
 FrameResources& resources = *new FrameResources;
 auto& depth = resources.depth; auto& surface = resources.surface;
@@ -346,6 +348,9 @@ void Reset(IDirect3DDevice9* d) {
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
     resources.shadowDepth.Reset(); resources.shadowColor.Reset();
     resources.shadowOwner = nullptr; resources.shadowSize = 0;
+    resources.waterMaskSurface.Reset(); resources.waterMask.Reset();
+    resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
+    watereffect::waterMaskSurface = nullptr;
     shadowFrameStarted = shadowFrameValid = false;
     stableShadowLightValid = false;
     shadowCacheValid = shadowAnchorValid = false;
@@ -384,6 +389,38 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
         frameCtx.device = d;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
         renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
+
+        // Per-frame water mask: watereffect::Scope binds this as a second
+        // render target during every actual water draw (see WaterEffect.h)
+        // and marks its pixels, blended by the GPU exactly like water's own
+        // colour output. The atmosphere composite reads it back to exclude
+        // fog from water entirely - the low-res, depth-aware fog upsample
+        // was producing a flat, wrong, hard-edged patch of fog colour on
+        // open water (confirmed via AtmosphereDebugMode=9), because water's
+        // constantly animated/refracting/reflecting surface makes that
+        // depth-based reconstruction unreliable right at the water plane.
+        // Sized to the real render target, cleared fresh every frame before
+        // any water draws happen.
+        D3DSURFACE_DESC targetDesc{};
+        if (target && SUCCEEDED(target->GetDesc(&targetDesc))) {
+            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
+                resources.waterMaskHeight != targetDesc.Height || !resources.waterMaskSurface) {
+                resources.waterMask.Reset(); resources.waterMaskSurface.Reset();
+                resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
+                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, resources.waterMask.GetAddressOf(), nullptr)) &&
+                    SUCCEEDED(resources.waterMask->GetSurfaceLevel(0, resources.waterMaskSurface.GetAddressOf()))) {
+                    resources.waterMaskOwner = d;
+                    resources.waterMaskWidth = targetDesc.Width;
+                    resources.waterMaskHeight = targetDesc.Height;
+                }
+            }
+            if (resources.waterMaskSurface) {
+                d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0);
+                watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
+                frameCtx.waterMaskTexture = resources.waterMask.Get();
+            }
+        }
     }
 }
 

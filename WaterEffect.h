@@ -18,6 +18,11 @@ float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
 float reflectionData[12]{};
+// Set once per frame by VolumeIntegration.h (BeforeClear) to a persistent,
+// frame-cleared render target. Bound as a second render target during every
+// matched water draw below so water can mark its own pixels for the
+// atmosphere pass to exclude - see FrameContext::waterMaskTexture.
+IDirect3DSurface9* waterMaskSurface=nullptr;
 std::vector<DWORD> code,vertexCode;
 inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
@@ -89,7 +94,18 @@ float3 noiseGradient(float2 p) {
     return float3(a+(b-a)*u.x+(c-a)*u.y+k*u.x*u.y,
                   du.x*((b-a)+k*u.y),du.y*((c-a)+k*u.x));
 }
-float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3):COLOR0 {
+// Second output (COLOR1): marks this pixel as water for the atmosphere
+// composite pass to read back and exclude fog from, via a second render
+// target bound during this draw (see watereffect::waterMaskSurface in
+// WaterEffect.h). Written as opaque white; the GPU's normal alpha blend
+// (the same one used for the colour output) turns it into a real
+// per-pixel "how much of this ended up as water" fraction in the mask
+// render target - not a flat 0/1 - so partially-blended shore edges
+// exclude fog partially too, which is what we actually want.
+struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; };
+WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3) {
+    WaterOutput result_;
+    result_.mask=float4(1,1,1,1);
     // Preserve the original alpha: surfaceTexture never contributes alpha.
     float4 base=tex2D(baseTexture,uv0);
     float time=controls.x*flowControl.x;
@@ -244,11 +260,12 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
     float foamAmount=(shore+waveFoam*foreverStyle.w)*crest*waterStyle.z;
     rgb+=float3(.42,.48,.43)*foamAmount;
-    if(flowControl.z>1.5)return float4(saturate((pathEnergy+halo)*3).xxx,1);
-    if(flowControl.z>.5)return float4(1,0,1,1);
+    if(flowControl.z>1.5){result_.color=float4(saturate((pathEnergy+halo)*3).xxx,1);return result_;}
+    if(flowControl.z>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
-    return float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
+    result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
+    return result_;
 }
 )HLSL";
 int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};GetPrivateProfileStringW(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):GetPrivateProfileIntW(L"Water",key,fallback,mainIni.c_str());}
@@ -340,6 +357,7 @@ struct Scope {
     float old[36]{},oldVertexControls[4]{};
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
+    ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
         // Fast early exit: only water shaders need the rest of this expensive setup
@@ -414,6 +432,10 @@ struct Scope {
             }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
+            if(waterMaskSurface){
+                d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
+                if(SUCCEEDED(d->SetRenderTarget(1,waterMaskSurface))) maskBound=true;
+            }
             static bool reported=false;
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched water PS + texture layout; replacement active\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
             static bool reflectionReported=false;if(extraState&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
@@ -421,7 +443,7 @@ struct Scope {
             ++frameMatches;
         }catch(...){Restore();}
     }
-    void Restore() noexcept {if(device){device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}device=nullptr;}}
+    void Restore() noexcept {if(device){device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}if(maskBound){device->SetRenderTarget(1,oldMaskRT.Get());maskBound=false;}device=nullptr;}}
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;
     Scope& operator=(const Scope&)=delete;
