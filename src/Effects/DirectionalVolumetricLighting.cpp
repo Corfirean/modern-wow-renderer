@@ -5,6 +5,7 @@
 #include <cstring>
 #include "../D3D9/ScopedRenderState.h"
 #include "../Diagnostics/PerformanceProfiler.h"
+#include "EnvironmentFogCapture.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
@@ -303,6 +304,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // retired full-res analytic shader (e.g. 8), which would read here as
  // "almost no fog" and silently gut this pass. New key, own default.
  m_settings.fogWash=std::clamp(read(L"AtmosphereWashPercent",55),0,100)*.01f;
+ m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",1)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
  m_historyValid=false;
 }
@@ -360,6 +362,23 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  for(auto s:{D3DRS_ZENABLE,D3DRS_ZWRITEENABLE,D3DRS_ALPHATESTENABLE,D3DRS_STENCILENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_FOGENABLE,D3DRS_LIGHTING,D3DRS_SRGBWRITEENABLE,D3DRS_ALPHABLENDENABLE})d->SetRenderState(s,FALSE);
  d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);d->SetRenderState(D3DRS_COLORWRITEENABLE,0xF);d->SetVertexShader(nullptr);
  const uint32_t write=1-m_historyReadIndex;D3DVIEWPORT9 low{0,0,m_lowWidth,m_lowHeight,0,1},full{0,0,m_fullWidth,m_fullHeight,0,1};
+ // WoW's own authored fog as the baseline (ROUND 5, Phase 11-15): read-
+ // only capture of the game's real fog curve/colour, updated every
+ // matched draw this frame regardless of shader family (terrain/model/
+ // water all feed the same EnvironmentFogCapture state). FOG DISTANCE
+ // still applies as a scale on top of the captured zone-authored distance
+ // rather than replacing it, so the slider stays meaningful while zone
+ // identity (Elwynn vs a coastal fog bank) comes through instead of one
+ // fixed synthetic profile everywhere.
+ const auto& envFog=renderer::EnvironmentFogCapture::Instance().State();
+ bool useEnv=m_settings.useEnvironmentBaseline&&envFog.valid;
+ float envScale=m_settings.maxDistance/520.f;
+ float aerialStart=useEnv?envFog.startDistance*envScale:m_settings.aerialStart;
+ float aerialEnd=useEnv?envFog.endDistance*envScale:m_settings.maxDistance;
+ aerialEnd=std::max(aerialEnd,aerialStart+10.f);
+ float ambR=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[0]:.36f;
+ float ambG=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[1]:.46f;
+ float ambB=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[2]:.58f;
  {
   // Boundary depth first: everything below (low-res downsample, upsample,
   // temporal) reads this instead of the raw scene depth, so water's own
@@ -375,7 +394,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  if(m_settings.debugMode==VolumetricDebugMode::BoundaryDepth){
   d->SetRenderTarget(0,target);d->SetPixelShader(m_boundaryDebugShader.Get());d->SetTexture(0,m_boundaryTexture.Get());
   d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
-  float c0[4]={f.projUnpack[0],f.projUnpack[1],m_settings.maxDistance,0};d->SetPixelShaderConstantF(0,c0,1);
+  float c0[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,c0,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);
   return true;
  }
@@ -385,16 +404,16 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   for(DWORD s=0;s<2;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);}
   float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,1};d->SetPixelShaderConstantF(0,c0,1);
   float intensity=f.celestialIntensity*(f.celestialIsMoon?m_settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
-  float c2[4]={.36f,.46f,.58f,m_settings.aerialDensity*m_settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,m_settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
+  float c2[4]={ambR,ambG,ambB,m_settings.aerialDensity*m_settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,m_settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
-  float c8[4]={m_settings.aerialStart,m_settings.maxDistance,float(m_settings.sampleCount),0};float c9[4]={f.cameraPosition.z+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={f.cameraPosition.z+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*m_settings.sunGlowStrength,.75f*m_settings.sunGlowStrength};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
+  float c8[4]={aerialStart,aerialEnd,float(m_settings.sampleCount),0};float c9[4]={f.cameraPosition.z+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={f.cameraPosition.z+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*m_settings.sunGlowStrength,.75f*m_settings.sunGlowStrength};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);
  }
  IDirect3DTexture9* atmosphere=m_integratedTexture.Get();bool historyOk=ValidateHistory(f);
  const bool runTemporal=m_settings.temporalEnabled&&(m_settings.debugMode==VolumetricDebugMode::None||m_settings.debugMode==VolumetricDebugMode::Temporal||m_settings.debugMode==VolumetricDebugMode::Upsampled);
  if(runTemporal){ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereTemporal);d->SetRenderTarget(0,m_historySurface[write].Get());d->SetPixelShader(m_temporalShader.Get());d->SetTexture(0,m_integratedTexture.Get());d->SetTexture(1,m_historyTexture[m_historyReadIndex].Get());d->SetTexture(2,m_depthTexture[write].Get());d->SetTexture(3,m_depthTexture[m_historyReadIndex].Get());for(DWORD s=0;s<4;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);}float c0[4]={1.f/m_lowWidth,1.f/m_lowHeight,m_settings.temporalBlend,historyOk?1.f:0.f};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,f.projUnpack,1);float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(2,inv[0],3);float cam[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};d->SetPixelShaderConstantF(5,cam,1);d->SetPixelShaderConstantF(6,&m_previousView.m[0][0],4);d->SetPixelShaderConstantF(10,m_previousProjection,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);atmosphere=m_historyTexture[write].Get();}
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],m_settings.maxDistance,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,m_settings.fogWash,0,0};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);

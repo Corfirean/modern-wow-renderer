@@ -19,6 +19,10 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,400,5,160},
  {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,200,5,80},
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
+ // Derives fog distance/colour from WoW's own authored values for the
+ // current zone/shader (read-only capture) instead of one fixed profile
+ // everywhere - FOG DISTANCE still scales it. Off = old fixed profile.
+ {KIND_TOGGLE,L"Atmosphere",L"UseEnvironmentFog","WOW FOG BASELINE",0,1,1,1},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereQuality","ATMOSPHERE QUALITY",0,2,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereMaxDistance","FOG DISTANCE",200,1200,20,520},

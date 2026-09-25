@@ -50,6 +50,14 @@ namespace renderer
         // letting it show through. Lower preserves distant detail (e.g.
         // open water) instead of washing it to a flat colour.
         float fogWash = 0.55f;
+        // Derive aerial start/end distance and ambient fog colour from
+        // WoW's own authored fog (captured read-only from real shader
+        // constants - see EnvironmentFogCapture) instead of one fixed
+        // synthetic profile for every zone. The FOG DISTANCE/DENSITY
+        // sliders still apply as a scale on top of the captured baseline,
+        // not a replacement for it. Off falls back to the old fixed
+        // profile, e.g. to A/B compare or if a zone's capture looks wrong.
+        bool useEnvironmentBaseline = true;
         VolumetricDebugMode debugMode = VolumetricDebugMode::None;
     };
 
