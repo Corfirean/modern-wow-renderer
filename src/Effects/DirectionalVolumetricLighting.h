@@ -50,6 +50,14 @@ namespace renderer
         // letting it show through. Lower preserves distant detail (e.g.
         // open water) instead of washing it to a flat colour.
         float fogWash = 0.55f;
+        // ROUND 5 Phase 16-17: independent multipliers on top of fogWash -
+        // extinctionStrength controls how much distant geometry fades out,
+        // scatterStrength controls how much light the atmosphere itself
+        // adds toward the camera. Both default 1.0 (no change from the
+        // single-wash blend); not exposed to the tuning overlay yet, set
+        // via ini for now.
+        float extinctionStrength = 1.0f;
+        float scatterStrength = 1.0f;
         // Derive aerial start/end distance and ambient fog colour from
         // WoW's own authored fog (captured read-only from real shader
         // constants - see EnvironmentFogCapture) instead of one fixed

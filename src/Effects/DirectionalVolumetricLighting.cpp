@@ -238,14 +238,25 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 
 const char* kCompositeSource = R"HLSL(
 sampler2D sceneMap:register(s0); sampler2D atmosphereMap:register(s1); sampler2D depthMap:register(s2);
-// x=debug passthrough, y=wash strength (how much fog is allowed to replace
-// the scene behind it vs let it show through)
+// x=debug passthrough, y=wash (overall artistic multiplier, applies to
+// both terms below - kept for the existing FOG WASH slider), z=extinction
+// scale, w=scatter scale (ROUND 5 Phase 16-17: these two are independent
+// knobs on top of wash - "how much distant geometry disappears" vs "how
+// much light the atmosphere emits toward camera" - a dense fog can hide
+// something without necessarily glowing. Both default 1.0, which makes
+// this mathematically identical to the old single-wash blend; tuning them
+// apart is a deliberate future step, not a default behaviour change.
 float4 tuning:register(c0); float4 sourceScreen:register(c1);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float4 a=tex2D(atmosphereMap,uv); if(tuning.x>.5)return float4(a.rgb,1);
  float4 scene=tex2D(sceneMap,uv);
- float wash=tuning.y; float aa=saturate(a.a)*wash;
- float3 result=scene.rgb*(1-aa)+a.rgb*wash;
+ // Proper radiative form: T is the fraction of the scene that survives
+ // extinction through the medium, not "how much fog to paint over the
+ // screen". a.a is stored as (1-T) by the integrate pass.
+ float T=saturate(1-a.a);
+ float wash=tuning.y;
+ float extinctionAmt=lerp(1.0,T,saturate(wash*tuning.z));
+ float3 result=scene.rgb*extinctionAmt+a.rgb*wash*tuning.w;
  // Preserve the game's own sun disc luminance. Atmosphere supplies the halo,
  // not a second emitter painted over the sprite. The sky-depth gate prevents
  // this protection mask from punching through foreground occluders.
@@ -304,6 +315,10 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // retired full-res analytic shader (e.g. 8), which would read here as
  // "almost no fog" and silently gut this pass. New key, own default.
  m_settings.fogWash=std::clamp(read(L"AtmosphereWashPercent",55),0,100)*.01f;
+ // ROUND 5 Phase 16-17. Not exposed in the tuning overlay - deliberate
+ // internal knobs for now, defaults keep the old single-wash behaviour.
+ m_settings.extinctionStrength=std::clamp(read(L"AtmosphereExtinctionPercentInternal",100),0,300)*.01f;
+ m_settings.scatterStrength=std::clamp(read(L"AtmosphereScatterPercentInternal",100),0,300)*.01f;
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",1)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
  m_historyValid=false;
@@ -416,7 +431,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,m_settings.fogWash,0,0};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,m_settings.fogWash,m_settings.extinctionStrength,m_settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
  }
  m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;m_previousWasMoon=f.celestialIsMoon;m_previousCelestialIntensity=f.celestialIntensity;return true;
 }
