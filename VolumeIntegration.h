@@ -684,7 +684,27 @@ bool Composite(IDirect3DDevice9* d) {
             constants[10][2] = body->viewSpaceDirection.z;
             constants[10][3] = 0.f;
         } else {
+            constants[2][0] = -2.f;
+            constants[2][1] = -2.f;
             constants[2][2] = 0.f;
+        }
+
+        // CelestialTracker is the single source of truth for celestial
+        // direction/position; mirror it into FrameContext too so anything
+        // else reading these (currently only the debug-only, off-by-default
+        // DirectionalVolumetricLighting path) can't disagree with it by
+        // still carrying the old v[24]-derived value.
+        auto& frameCtx = renderer::FrameContext::Current();
+        if (body) {
+            frameCtx.sunScreenX = body->screenX;
+            frameCtx.sunScreenY = body->screenY;
+            frameCtx.sunStrength = constants[2][2];
+            frameCtx.sunDirectionView = body->viewSpaceDirection;
+            frameCtx.sunDirectionWorld = body->worldSpaceDirection;
+        } else {
+            frameCtx.sunScreenX = -1.f;
+            frameCtx.sunScreenY = -1.f;
+            frameCtx.sunStrength = 0.f;
         }
     }
 

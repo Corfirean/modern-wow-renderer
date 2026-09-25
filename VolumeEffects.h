@@ -30,25 +30,28 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     if(mode.x<.5)return float4(z/medium.w,z/medium.w,z/medium.w,1);
     if(mode.x>5.5) {
         float clearThreshold=lerp(.9995,.955,step(sun.w,.99));
+        // Depth-based occlusion ONLY - is this pixel actually open sky.
+        // Geometry/cloud can attenuate this, never emit: brightness never
+        // enters the emission term below.
         float openness=smoothstep(clearThreshold,1,raw);
-        float3 skyColor=tex2D(scene,uv).rgb;
-        float skyLuminance=dot(skyColor,float3(.2126,.7152,.0722));
-        float sourceThreshold=clamp(mode.w, 0.40, 0.85);
-        float sunDist=length(uv-sun.xy);
-        // The source mask must stay locked to the real celestial disc: a wide,
-        // slow-decaying gaussian let bright clouds anywhere near the sun read
-        // as a second emitter. This is a tight, hard-clipped falloff so only
-        // the disc itself (and its immediate glow) can seed the rays; geometry
-        // and cloud brightness elsewhere only ever occlude, never emit.
+        // Aspect-ratio-correct distance to the real, CelestialTracker-
+        // confirmed disc position (sun.xy). Raw UV-space distance is
+        // squashed on non-square screens - a 0.1 horizontal delta covers
+        // far more pixels than 0.1 vertical at 16:9 - which skewed the mask
+        // into an ellipse. Express both axes in the same physical unit
+        // (screen-height pixels) before measuring.
+        float aspect=rayTuning.y>0.0 ? rayTuning.y/max(rayTuning.x,1e-6) : 1.0;
+        float2 delta=float2((uv.x-sun.x)*aspect,uv.y-sun.y);
+        float sunDist=length(delta);
+        // Pure position mask, tight and hard-clipped around the real disc.
+        // A bright cloud anywhere else on screen contributes nothing here -
+        // it can only show up via `openness` failing to be 1 (occlusion),
+        // never by adding to `sunMask`. This is the fix for "bright cloud
+        // becomes a second sun".
         float discFalloff=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*260.0);
         float discCutoff=1.0-smoothstep(0.10,0.16,sunDist);
         float sunMask=discFalloff*discCutoff;
-        float visibleSun=saturate((skyLuminance-sourceThreshold)/max(1-sourceThreshold,.01));
-        // A soft sky gate around the exact projected sun remains present when
-        // the disc itself is hidden by a tower. Geometry cuts this source mask,
-        // and the radial pass turns that cut into crepuscular rays.
-        float skyGate=saturate((skyLuminance-sourceThreshold*.48)/max(1-sourceThreshold*.48,.01));
-        float amount=openness*sunMask*(.38*skyGate+1.25*visibleSun)*sun.z*(.62+mode.y*.35);
+        float amount=openness*sunMask*sun.z*(.62+mode.y*.35);
         if(mode.x>6.5)return float4(amount,amount,amount,1);
         float3 color=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.35,.75);
         return float4(color*amount,1);
