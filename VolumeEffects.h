@@ -68,7 +68,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float dz=delta.z;
     float u=clamp(medium.y*dz,-12.0,12.0);
     float factor=(abs(u)<0.02) ? (1.0-0.5*u+(1.0/6.0)*u*u) : ((1.0-exp(-u))/u);
-    float eCam=exp(-clamp(hCam*medium.y,-8.0,8.0));
+    // Clamp was +-8 (exp(8)~=2981x): a camera sitting even moderately below
+    // BaseHeight - the normal case, since BaseHeight is an absolute world Z
+    // and most zones don't put ground at Z=0 to match a default/tuned
+    // value - blew this multiplier up catastrophically, whiting out the
+    // whole scene instead of giving a graceful "thicker in the valley"
+    // falloff. +-3 (exp(3)~=20x) still gives real height response without
+    // the blowout.
+    float eCam=exp(-clamp(hCam*medium.y,-3.0,3.0));
     float optDepth=medium.z*rayLen*eCam*factor;
     optDepth=max(optDepth,0.0);
 
@@ -79,7 +86,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float hCamMist=origin.z-groundMist.x;
     float uMist=clamp(groundMist.y*dz,-12.0,12.0);
     float factorMist=(abs(uMist)<0.02) ? (1.0-0.5*uMist+(1.0/6.0)*uMist*uMist) : ((1.0-exp(-uMist))/uMist);
-    float eCamMist=exp(-clamp(hCamMist*groundMist.y,-8.0,8.0));
+    float eCamMist=exp(-clamp(hCamMist*groundMist.y,-3.0,3.0));
     optDepth+=max(groundMist.z*rayLen*eCamMist*factorMist,0.0);
 
     // Atmospheric rolling noise modulation
@@ -90,7 +97,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     optDepth*=lerp(.75,1.25,cloud*detail.z);
 
     float transmission=exp(-clamp(optDepth,0.0,12.0));
-    float isSky=step(.9995,raw);
+    // Was a hard step() at the sky/geometry depth threshold - any camera
+    // angle that put the horizon near mid-screen showed this as a visible
+    // seam/band. smoothstep spreads the transition over a few depth units
+    // instead of one hard edge.
+    float isSky=smoothstep(.9985,.9998,raw);
     float distFog=1.0-exp(-min(z,medium.w)*medium.z*0.06);
     float fogAmount=max(1.0-transmission,distFog*0.35);
     // Smooth transition into sky distance fog rather than a hard cut
