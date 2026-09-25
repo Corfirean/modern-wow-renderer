@@ -84,8 +84,8 @@ LegacyVolumeShaders legacyShaders;
 LegacyFrameTargets legacyTargets;
 
 struct FrameResources {
-    ComPtr<IDirect3DTexture9> depth, noise, shadowDepth, shadowColor, waterMask;
-    ComPtr<IDirect3DSurface9> surface, originalDepth, target, shadowDepthSurface, shadowColorSurface, waterMaskSurface;
+    ComPtr<IDirect3DTexture9> depth, noise, shadowDepth, shadowColor, waterMask, waterDepth;
+    ComPtr<IDirect3DSurface9> surface, originalDepth, target, shadowDepthSurface, shadowColorSurface, waterMaskSurface, waterDepthSurface;
     IDirect3DDevice9* noiseOwner = nullptr;
     IDirect3DDevice9* shadowOwner = nullptr;
     UINT shadowSize = 0;
@@ -349,8 +349,10 @@ void Reset(IDirect3DDevice9* d) {
     resources.shadowDepth.Reset(); resources.shadowColor.Reset();
     resources.shadowOwner = nullptr; resources.shadowSize = 0;
     resources.waterMaskSurface.Reset(); resources.waterMask.Reset();
+    resources.waterDepthSurface.Reset(); resources.waterDepth.Reset();
     resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
     watereffect::waterMaskSurface = nullptr;
+    watereffect::waterDepthSurface = nullptr;
     shadowFrameStarted = shadowFrameValid = false;
     stableShadowLightValid = false;
     shadowCacheValid = shadowAnchorValid = false;
@@ -415,10 +417,28 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
                     resources.waterMaskHeight = targetDesc.Height;
                 }
             }
+            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
+                resources.waterMaskHeight != targetDesc.Height || !resources.waterDepthSurface) {
+                resources.waterDepth.Reset(); resources.waterDepthSurface.Reset();
+                D3DFORMAT depthFmt = D3DFMT_R32F;
+                if (FAILED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr))) {
+                    depthFmt = D3DFMT_A16B16G16R16F;
+                    d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr);
+                }
+                if (resources.waterDepth)
+                    resources.waterDepth->GetSurfaceLevel(0, resources.waterDepthSurface.GetAddressOf());
+            }
             if (resources.waterMaskSurface) {
                 d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0);
                 watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
                 frameCtx.waterMaskTexture = resources.waterMask.Get();
+            }
+            if (resources.waterDepthSurface) {
+                d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0);
+                watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
+                frameCtx.waterDepthTexture = resources.waterDepth.Get();
             }
         }
     }

@@ -74,13 +74,16 @@ namespace renderer
         IDirect3DTexture9* sceneColor = nullptr;
         IDirect3DSurface9* sceneSurface = nullptr;
         IDirect3DTexture9* atmosphereNoise = nullptr;
-        // Per-pixel "how much of this pixel is water" (0..1), written by
-        // watereffect::Scope as a second render target during the actual
-        // water draws this frame (see WaterEffect.h), blended the same way
-        // as water's own colour output. Consumed by the atmosphere
-        // composite to keep fog off water entirely - see
-        // DirectionalVolumetricLighting.cpp for why.
+        // Per-pixel "how much of this pixel is water" (0..1) and the water
+        // surface's own view-space depth, written by watereffect::Scope as
+        // extra render targets during the actual water draws this frame
+        // (see WaterEffect.h). The main depth buffer holds whatever is
+        // BEHIND water (water doesn't write it), so the atmosphere pass
+        // uses these to march air only down to the water SURFACE instead
+        // of through the water to the seabed - see
+        // DirectionalVolumetricLighting.cpp's boundary-depth pass.
         IDirect3DTexture9* waterMaskTexture = nullptr;
+        IDirect3DTexture9* waterDepthTexture = nullptr;
 
         bool depthAvailable = false;
         bool cameraValid = false;

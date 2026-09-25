@@ -79,6 +79,15 @@ namespace renderer
         ComPtr<IDirect3DSurface9> m_depthSurface[2];
         ComPtr<IDirect3DTexture9> m_upsampledTexture;
         ComPtr<IDirect3DSurface9> m_upsampledSurface;
+        // Full-res "where does air stop" depth: scene depth everywhere,
+        // except water pixels, where it's the water SURFACE depth instead
+        // of the seabed depth already sitting in the main depth buffer
+        // (water doesn't write that). Computed once per frame and fed into
+        // both the low-res downsample and the full-res bilateral upsample,
+        // so the atmosphere never integrates air through water to the
+        // seabed - see DirectionalVolumetricLighting.cpp.
+        ComPtr<IDirect3DTexture9> m_boundaryTexture;
+        ComPtr<IDirect3DSurface9> m_boundarySurface;
         uint32_t m_historyReadIndex = 0;
         bool m_historyValid = false;
         ComPtr<IDirect3DPixelShader9> m_depthShader;
@@ -86,6 +95,7 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_temporalShader;
         ComPtr<IDirect3DPixelShader9> m_upsampleShader;
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
+        ComPtr<IDirect3DPixelShader9> m_boundaryShader;
         Vec3 m_previousCamera{};
         float m_previousProjection[4]{};
         Matrix4 m_previousView{};
