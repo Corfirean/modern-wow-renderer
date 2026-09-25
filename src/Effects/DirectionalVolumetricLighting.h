@@ -119,6 +119,22 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_boundaryShader;
         ComPtr<IDirect3DPixelShader9> m_boundaryDebugShader;
+        // Ground-height reference for fog/mist, so their base height tracks
+        // actual terrain/water level instead of the camera's own altitude
+        // (fogBase/mistBase used to be cameraPosition.z + offset - flying
+        // up took the fog layer up with you). A tiny reduction pass takes
+        // an 8x8 grid of world-space heights reconstructed from the
+        // boundary depth and keeps the minimum (closest to the ground/
+        // water actually in view), read back asynchronously (2-deep ring,
+        // ~1-2 frames of latency, no GPU stall) and EMA-smoothed.
+        ComPtr<IDirect3DPixelShader9> m_groundHeightShader;
+        ComPtr<IDirect3DTexture9> m_groundHeightTexture[2];
+        ComPtr<IDirect3DSurface9> m_groundHeightSurface[2];
+        ComPtr<IDirect3DSurface9> m_groundHeightStaging[2];
+        uint32_t m_groundHeightWriteIndex = 0;
+        bool m_groundHeightIssued[2]{};
+        float m_smoothedGroundHeight = 0.0f;
+        bool m_groundHeightValid = false;
         Vec3 m_previousCamera{};
         float m_previousProjection[4]{};
         Matrix4 m_previousView{};

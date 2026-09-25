@@ -53,6 +53,34 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  return saturate(z/max(projection.z,1.0)).xxxx;
 })HLSL";
 
+// Ground-height reduction: samples an 8x8 grid across the boundary depth
+// (already water-surface-aware, not seabed), reconstructs each sample's
+// world-space Z and keeps the minimum - a cheap proxy for "the lowest
+// terrain/water actually in view", i.e. roughly ground level, instead of
+// the camera's own altitude. Read back asynchronously on the CPU (see
+// Render()) and used as the reference height for height fog/ground mist
+// so flying up doesn't drag the fog layer up with the camera.
+const char* kGroundHeightSource = R"HLSL(
+sampler2D boundaryDepth:register(s0);
+float4 cameraPos:register(c0); float4 projection:register(c1); // x=A,y=B,z=scaleX,w=scaleY
+float4 invView0:register(c2); float4 invView1:register(c3); float4 invView2:register(c4);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+ float minZ=1e6;
+ [unroll] for(int y=0;y<8;++y) {
+  [unroll] for(int x=0;x<8;++x) {
+   float2 suv=(float2(x,y)+0.5)/8.0;
+   float raw=tex2Dlod(boundaryDepth,float4(suv,0,0)).r;
+   if(raw<.9999) {
+    float z=projection.y/(raw-projection.x);
+    float3 view=float3((suv.x*2-1)/projection.z,(1-suv.y*2)/projection.w,1)*z;
+    float worldZ=cameraPos.z+view.x*invView0.z+view.y*invView1.z+view.z*invView2.z;
+    minZ=min(minZ,worldZ);
+   }
+  }
+ }
+ return minZ.xxxx;
+})HLSL";
+
 const char* kDepthSource = R"HLSL(
 sampler2D fullDepth:register(s0);
 float4 texel:register(c0);
@@ -334,15 +362,16 @@ void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
  if(m_owner&&m_owner!=device)return;
  m_integratedSurface.Reset();m_integratedTexture.Reset();m_upsampledSurface.Reset();m_upsampledTexture.Reset();
  m_boundarySurface.Reset();m_boundaryTexture.Reset();
- for(int i=0;i<2;++i){m_historySurface[i].Reset();m_historyTexture[i].Reset();m_depthSurface[i].Reset();m_depthTexture[i].Reset();}
- m_depthShader.Reset();m_integrateShader.Reset();m_temporalShader.Reset();m_upsampleShader.Reset();m_compositeShader.Reset();m_boundaryShader.Reset();m_boundaryDebugShader.Reset();
+ for(int i=0;i<2;++i){m_historySurface[i].Reset();m_historyTexture[i].Reset();m_depthSurface[i].Reset();m_depthTexture[i].Reset();m_groundHeightSurface[i].Reset();m_groundHeightTexture[i].Reset();m_groundHeightStaging[i].Reset();m_groundHeightIssued[i]=false;}
+ m_groundHeightValid=false;m_smoothedGroundHeight=0.f;
+ m_depthShader.Reset();m_integrateShader.Reset();m_temporalShader.Reset();m_upsampleShader.Reset();m_compositeShader.Reset();m_boundaryShader.Reset();m_boundaryDebugShader.Reset();m_groundHeightShader.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_targetFormat=D3DFMT_UNKNOWN;m_historyValid=false;m_previousViewValid=false;
 }
 
 bool DirectionalVolumetricLighting::EnsureShaders(IDirect3DDevice9* d)
 {
- if(m_depthShader&&m_integrateShader&&m_temporalShader&&m_upsampleShader&&m_compositeShader&&m_boundaryShader&&m_boundaryDebugShader)return true;
- return Compile(d,kDepthSource,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_boundaryDebugShader.GetAddressOf());
+ if(m_depthShader&&m_integrateShader&&m_temporalShader&&m_upsampleShader&&m_compositeShader&&m_boundaryShader&&m_boundaryDebugShader&&m_groundHeightShader)return true;
+ return Compile(d,kDepthSource,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_boundaryDebugShader.GetAddressOf())&&Compile(d,kGroundHeightSource,m_groundHeightShader.GetAddressOf());
 }
 
 bool DirectionalVolumetricLighting::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h,D3DFORMAT format)
@@ -355,6 +384,19 @@ bool DirectionalVolumetricLighting::EnsureResources(IDirect3DDevice9* d,uint32_t
  if(!tex(lw,lh,hdr,m_integratedTexture,m_integratedSurface)){hdr=D3DFMT_A8R8G8B8;if(!tex(lw,lh,hdr,m_integratedTexture,m_integratedSurface))return false;}
  for(int i=0;i<2;++i){if(!tex(lw,lh,hdr,m_historyTexture[i],m_historySurface[i]))return false;if(!tex(lw,lh,D3DFMT_R32F,m_depthTexture[i],m_depthSurface[i])&&!tex(lw,lh,D3DFMT_A8R8G8B8,m_depthTexture[i],m_depthSurface[i]))return false;}
  if(!tex(w,h,D3DFMT_R32F,m_boundaryTexture,m_boundarySurface)&&!tex(w,h,D3DFMT_A8R8G8B8,m_boundaryTexture,m_boundarySurface))return false;
+ // Ground-height reduction target + its async readback staging surfaces.
+ // Best-effort: if R32F render targets or system-memory offscreen
+ // surfaces aren't creatable, the ground-height feature just stays
+ // disabled (m_groundHeightValid stays false) and fogBase/mistBase fall
+ // back to the old camera-relative behaviour - not fatal to the rest of
+ // the atmosphere pass.
+ for(int i=0;i<2;++i){
+  m_groundHeightSurface[i].Reset();m_groundHeightTexture[i].Reset();m_groundHeightStaging[i].Reset();
+  if(tex(1,1,D3DFMT_R32F,m_groundHeightTexture[i],m_groundHeightSurface[i]))
+   d->CreateOffscreenPlainSurface(1,1,D3DFMT_R32F,D3DPOOL_SYSTEMMEM,m_groundHeightStaging[i].GetAddressOf(),nullptr);
+  m_groundHeightIssued[i]=false;
+ }
+ m_groundHeightValid=false;
  return tex(w,h,hdr,m_upsampledTexture,m_upsampledSurface);
 }
 
@@ -412,6 +454,34 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
  }
+ if(m_groundHeightShader&&m_groundHeightSurface[0]&&m_groundHeightSurface[1]){
+  // Read back the OTHER ring slot first - it was issued 1-2 frames ago,
+  // so its GetRenderTargetData copy should be complete by now (no stall).
+  uint32_t readIdx=1-m_groundHeightWriteIndex;
+  if(m_groundHeightIssued[readIdx]&&m_groundHeightStaging[readIdx]){
+   D3DLOCKED_RECT lr{};
+   if(SUCCEEDED(m_groundHeightStaging[readIdx]->LockRect(&lr,nullptr,D3DLOCK_READONLY))){
+    float v=*reinterpret_cast<float*>(lr.pBits);
+    m_groundHeightStaging[readIdx]->UnlockRect();
+    if(std::isfinite(v)&&v<1e5f){
+     m_smoothedGroundHeight=m_groundHeightValid?(m_smoothedGroundHeight*.9f+v*.1f):v;
+     m_groundHeightValid=true;
+    }
+   }
+  }
+  D3DVIEWPORT9 one{0,0,1,1,0,1};
+  d->SetViewport(&one);d->SetRenderTarget(0,m_groundHeightSurface[m_groundHeightWriteIndex].Get());d->SetPixelShader(m_groundHeightShader.Get());
+  d->SetTexture(0,m_boundaryTexture.Get());d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+  float gc0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};
+  float inv0[4]={f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0};
+  float inv1[4]={f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0};
+  float inv2[4]={f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0};
+  d->SetPixelShaderConstantF(0,gc0,1);d->SetPixelShaderConstantF(1,f.projUnpack,1);d->SetPixelShaderConstantF(2,inv0,1);d->SetPixelShaderConstantF(3,inv1,1);d->SetPixelShaderConstantF(4,inv2,1);
+  DrawScreenQuad(d,1,1);d->SetTexture(0,nullptr);
+  if(m_groundHeightStaging[m_groundHeightWriteIndex]&&SUCCEEDED(d->GetRenderTargetData(m_groundHeightSurface[m_groundHeightWriteIndex].Get(),m_groundHeightStaging[m_groundHeightWriteIndex].Get())))
+   m_groundHeightIssued[m_groundHeightWriteIndex]=true;
+  m_groundHeightWriteIndex=1-m_groundHeightWriteIndex;
+ }
  if(m_settings.debugMode==VolumetricDebugMode::BoundaryDepth){
   d->SetRenderTarget(0,target);d->SetPixelShader(m_boundaryDebugShader.Get());d->SetTexture(0,m_boundaryTexture.Get());
   d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
@@ -427,7 +497,13 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   float intensity=f.celestialIntensity*(f.celestialIsMoon?m_settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
   float c2[4]={ambR,ambG,ambB,m_settings.aerialDensity*m_settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,m_settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
-  float c8[4]={aerialStart,aerialEnd,float(m_settings.sampleCount),0};float c9[4]={f.cameraPosition.z+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={f.cameraPosition.z+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*m_settings.sunGlowStrength,.75f*m_settings.sunGlowStrength};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
+  // Ground reference for height fog/mist: the smoothed min-visible-height
+  // estimate when we have one (tracks actual terrain/water, not the
+  // camera), falling back to camera height only until the first readback
+  // lands (~1-2 frames after startup/a map load) or if nothing but sky was
+  // ever visible in the reduction sample.
+  float groundRef=m_groundHeightValid?m_smoothedGroundHeight:f.cameraPosition.z;
+  float c8[4]={aerialStart,aerialEnd,float(m_settings.sampleCount),0};float c9[4]={groundRef+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={groundRef+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*m_settings.sunGlowStrength,.75f*m_settings.sunGlowStrength};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);
  }
  IDirect3DTexture9* atmosphere=m_integratedTexture.Get();bool historyOk=ValidateHistory(f);
