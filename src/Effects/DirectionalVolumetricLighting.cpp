@@ -319,7 +319,12 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // internal knobs for now, defaults keep the old single-wash behaviour.
  m_settings.extinctionStrength=std::clamp(read(L"AtmosphereExtinctionPercentInternal",100),0,300)*.01f;
  m_settings.scatterStrength=std::clamp(read(L"AtmosphereScatterPercentInternal",100),0,300)*.01f;
- m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",1)!=0;
+ // Default off: live testing showed a case where this fogged the whole
+ // sky (sun invisible even at zenith, independent of in-game weather) -
+ // now restricted to the one register with real confidence (water), but
+ // defaulting off until that narrower version is confirmed safe across
+ // more zones. The toggle in the overlay still works for testing it.
+ m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
  m_historyValid=false;
 }

@@ -45,14 +45,22 @@ public:
             uint64_t vsHash = renderer::g_trackedState.vsHash;
             if (!vsHash) return;
             UINT reg;
-            // Same table as DistanceFog.h - registers verified from
-            // captured shader instructions for these specific hashes.
+            // Restricted to the water case only. DistanceFog.h's other
+            // registers (12/8/30, covering several terrain/model shader
+            // hashes) are confirmed to hold *a* fog-shaped curve, but not
+            // confirmed to represent "how far you can see across the
+            // zone" specifically - live testing surfaced a case where the
+            // sun disappeared even looking straight up (which forces
+            // z = endDistance for every sky pixel, so a too-short capture
+            // fogs the whole sky uniformly), independent of the in-game
+            // weather setting. That points at one of those registers
+            // being something else entirely (a local fade with the same
+            // formula shape, not a world-visibility distance). Water's
+            // register is the one case with real cross-validated
+            // confidence - WaterEffect's deepTint/environment blend has
+            // depended on reading it correctly for weeks.
             switch (vsHash) {
-            case 0xb598fbc887a39675ull: case 0x512e5caf066afb4bull: case 0xbd0060eb34ea4a7cull: reg = 12; break;
             case 0x206d861fd0a721ddull: reg = 4; break;
-            case 0xd8f18d8080e6bb3aull: reg = 8; break;
-            case 0x17a93e12ce3e0fd1ull: case 0x2361bbcb97cae46ull: case 0x2e3dc5694f4a01afull:
-            case 0x5f2c6b3af8c6e543ull: case 0xd6dc2873a70922e9ull: case 0xf6a1996937ab5dc7ull: case 0xff32338728131932ull: reg = 30; break;
             default: return;
             }
             float raw[4]{};
