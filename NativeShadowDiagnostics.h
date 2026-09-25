@@ -62,6 +62,13 @@ inline IDirect3DDevice9* previewOwner = nullptr;
 inline IDirect3DPixelShader9* previewShader = nullptr;
 inline bool enhancementEnabled = true;
 inline float softnessScale = 1.45f;
+// 100% == the native 0.3 max-darkening constant found in the confirmed
+// receivers (def c12, 0.3, 0.7, 0, 0 -> result = visibility*0.3+0.7, so
+// shadows never go below 70% brightness natively). This scales that 0.3
+// directly; 1-scaledStrength is re-derived each time so the fully-lit
+// case (visibility=1) still comes out to 1.0, not just the shadowed case
+// getting darker.
+inline float strengthScale = 1.0f;
 inline std::wstring settingsPath;
 
 inline void ReloadEnhancement()
@@ -71,6 +78,9 @@ inline void ReloadEnhancement()
     const int percent = std::clamp(static_cast<int>(GetPrivateProfileIntW(
         L"NativeShadows", L"SoftnessPercent", 145, settingsPath.c_str())), 50, 220);
     softnessScale = static_cast<float>(percent) * .01f;
+    const int strengthPercent = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+        L"NativeShadows", L"StrengthPercent", 100, settingsPath.c_str())), 30, 250);
+    strengthScale = static_cast<float>(strengthPercent) * .01f;
 }
 
 inline uint64_t Mix(uint64_t h, uint64_t v)
@@ -316,6 +326,26 @@ inline bool FindReceiverRegisterLayout(uint64_t hash, UINT& startRegister, UINT&
     return false;
 }
 
+// Confirmed by disassembling the dumped .asm for each of these hashes:
+// every one defines c12 as (0.3, 0.7, 0, 0) and uses it as exactly
+// `result = shadowVisibility * c12.x + c12.y` right before the shadow
+// term is applied to the lit colour - i.e. shadows never go below 70%
+// brightness natively (c12.x is the only thing controlling how much
+// darker a fully-shadowed pixel gets). A fifth family-B hash
+// (0x449b66c5fb94fede) uses c12 for something structurally different
+// (a different instruction pattern entirely) and is deliberately excluded
+// here rather than assumed to match - same "verify before touching"
+// approach as the softness registers.
+inline bool FindStrengthRegister(uint64_t hash, UINT& reg)
+{
+    static constexpr uint64_t kConfirmed[] = {
+        0x08b17d1abaad8eceull, 0x634793193e26059dull, 0x6e6f053c4b910cf4ull, 0xac726e53bca0ac1aull
+    };
+    if (std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) == std::end(kConfirmed)) return false;
+    reg = 12u;
+    return true;
+}
+
 inline bool HasFourNativeCascades(int firstStage)
 {
     for (int i = 0; i < 4; ++i)
@@ -334,7 +364,9 @@ class SoftnessScope
 public:
     SoftnessScope(IDirect3DDevice9* d, uint64_t psHash, IDirect3DPixelShader9* trackedShader) : device(d)
     {
-        if (!enhancementEnabled || !device || std::abs(softnessScale - 1.f) < .001f || currentRtTexture)
+        const bool needSoftness = std::abs(softnessScale - 1.f) > .001f;
+        const bool needStrength = std::abs(strengthScale - 1.f) > .001f;
+        if (!enhancementEnabled || !device || (!needSoftness && !needStrength) || currentRtTexture)
             return;
 
         IDirect3DPixelShader9* actualShader = nullptr;
@@ -352,7 +384,29 @@ public:
             if (!loggedNoCascades) { loggedNoCascades = true; Append("[SOFTNESS] no 4-cascade texture set bound on this draw (psHash checked against stage 4 and 5)\n"); }
             return;
         }
+
+        DWORD colorWrite = 0;
+        if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
+
+        if (needSoftness) ApplySoftness(psHash);
+        if (needStrength) ApplyStrength(psHash);
+    }
+
+    ~SoftnessScope()
+    {
+        if (!device) return;
+        if (softnessActive) device->SetPixelShaderConstantF(softnessStart, softnessOriginal[0], softnessCount);
+        if (strengthActive) device->SetPixelShaderConstantF(strengthReg, strengthOriginal, 1);
+    }
+
+    SoftnessScope(const SoftnessScope&) = delete;
+    SoftnessScope& operator=(const SoftnessScope&) = delete;
+
+private:
+    void ApplySoftness(uint64_t psHash)
+    {
         bool oddRegistersOnly = false;
+        UINT startRegister = 0, registerCount = 0;
         if (!FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly))
         {
             static std::unordered_set<uint64_t> loggedUnmatched;
@@ -365,9 +419,7 @@ public:
             return;
         }
 
-        DWORD colorWrite = 0;
-        if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
-
+        float original[8][4]{}, adjusted[8][4]{};
         if (FAILED(device->GetPixelShaderConstantF(startRegister, original[0], registerCount))) return;
         std::copy(&original[0][0], &original[0][0] + registerCount * 4, &adjusted[0][0]);
 
@@ -401,7 +453,9 @@ public:
         }
         if (SUCCEEDED(device->SetPixelShaderConstantF(startRegister, adjusted[0], registerCount)))
         {
-            active = true;
+            softnessStart = startRegister; softnessCount = registerCount;
+            std::copy(&original[0][0], &original[0][0] + registerCount * 4, &softnessOriginal[0][0]);
+            softnessActive = true;
             static bool loggedActive = false;
             if (!loggedActive)
             {
@@ -414,22 +468,45 @@ public:
         }
     }
 
-    ~SoftnessScope()
+    void ApplyStrength(uint64_t psHash)
     {
-        if (active && device) device->SetPixelShaderConstantF(startRegister, original[0], registerCount);
+        UINT reg = 0;
+        if (!FindStrengthRegister(psHash, reg)) return;
+        float value[4]{};
+        if (FAILED(device->GetPixelShaderConstantF(reg, value, 1))) return;
+        // Verified shape: (darkeningAmount, 1-darkeningAmount, 0, 0), used
+        // as result = shadowVisibility*x + y right before the shadow term
+        // is applied. Re-derive y from the scaled x so the fully-lit case
+        // (visibility=1) still lands on 1.0 instead of drifting.
+        if (std::abs(value[0] + value[1] - 1.f) > .01f || value[2] != 0.f || value[3] != 0.f) return;
+        float adjusted[4] = { std::clamp(value[0] * strengthScale, 0.f, 1.f), 0, 0, 0 };
+        adjusted[1] = 1.f - adjusted[0];
+        if (SUCCEEDED(device->SetPixelShaderConstantF(reg, adjusted, 1)))
+        {
+            strengthReg = reg;
+            std::copy(std::begin(value), std::end(value), strengthOriginal);
+            strengthActive = true;
+            static bool loggedActive = false;
+            if (!loggedActive)
+            {
+                loggedActive = true;
+                std::ostringstream s;
+                s << "[STRENGTH] ACTIVE: c" << reg << " darkening " << value[0] << " -> " << adjusted[0]
+                  << " for psHash=0x" << std::hex << psHash << std::dec << "\n";
+                Append(s.str());
+            }
+        }
     }
 
-    SoftnessScope(const SoftnessScope&) = delete;
-    SoftnessScope& operator=(const SoftnessScope&) = delete;
-
-private:
     IDirect3DDevice9* device = nullptr;
     int firstStage = -1;
-    UINT startRegister = 0;
-    UINT registerCount = 0;
-    bool active = false;
-    float original[8][4]{};
-    float adjusted[8][4]{};
+    bool softnessActive = false;
+    UINT softnessStart = 0;
+    UINT softnessCount = 0;
+    float softnessOriginal[8][4]{};
+    bool strengthActive = false;
+    UINT strengthReg = 0;
+    float strengthOriginal[4]{};
 };
 
 inline void LogConstantsBlock(IDirect3DDevice9* d, std::ostringstream& s)

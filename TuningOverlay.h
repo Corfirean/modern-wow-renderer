@@ -56,6 +56,10 @@ inline std::vector<Item> items={
  {KIND_HEADER,nullptr,nullptr,"--- DYNAMIC SHADOWS ---",0,0,0,0},
  {KIND_TOGGLE,L"NativeShadows",L"Enabled","NATIVE SHADOWS",0,1,1,1},
  {KIND_SLIDER,L"NativeShadows",L"SoftnessPercent","SHADOW SOFTNESS",50,220,5,145},
+ // Scales the native max-darkening constant (100% = native 0.3, i.e.
+ // shadows never go below 70% brightness). Disassembly-verified on 4
+ // confirmed receiver shaders only - see NativeShadowDiagnostics.h.
+ {KIND_SLIDER,L"NativeShadows",L"StrengthPercent","SHADOW STRENGTH",30,250,10,100},
 
  // === IMAGE & COLOR ===
  {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},
