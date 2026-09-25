@@ -19,9 +19,11 @@ The renderer hooks the D3D9 device on creation without touching game files, netw
 - **Mie & Rayleigh Phase Scattering:** Realistic directional glow around the sun and forward scattering through fog.
 - **Atmospheric Noise Modulation:** Rolling procedural noise simulating wind and shifting fog density.
 
-### 3. Screen-Space Contact Shadows & AO
-- **Depth-Discontinuity Shadows:** Micro-occlusion and contact shadows generated directly from the scene depth buffer.
-- **Directional Shadow Marching:** Casts screen-space shadows along the sun's view direction without requiring full 3D shadow maps.
+### 3. Native Shadow Enhancement
+- **WoW's own cascaded shadow maps as source of truth:** rather than reconstructing shadows from screen-space depth, the renderer enhances the game's existing 4-cascade shadow maps in place — position and direction are never touched, only quality.
+- **Shadow Softness:** Scales the native PCF sample radius for softer, less aliased shadow edges.
+- **Shadow Strength:** Darkens shadows beyond the game's default floor by swapping in a byte-patched copy of the confirmed receiver shaders (only the darkening constant changed, everything else byte-identical) — a runtime constant write doesn't work here since that value is compiled into the shader.
+- Adjustable live via the `F7` menu (`NATIVE SHADOWS`, `SHADOW SOFTNESS`, `SHADOW STRENGTH`).
 
 ### 4. Modern Water Shader Overhaul
 - **Screen-Space Reflections (SSR):** Reflects world geometry and characters across water surfaces with adaptive step sizes.
@@ -48,6 +50,7 @@ The project includes two primary configuration files:
 - **`GraphicsEffects.ini`** — Detailed real-time graphics parameters divided into:
   - `[Atmosphere]` (Fog density, shaft strength, sun vertical scale, softness, falloff)
   - `[Water]` (Wave speed, ripples, reflections, foam, absorption, glint)
+  - `[NativeShadows]` (Shadow enable, softness, strength — enhances the game's own cascaded shadow maps)
   - `[PostProcess]` (Brightness, contrast, gamma, sharpness)
   - `[DistanceFog]` (Legacy world distance fog adjustments)
 
@@ -113,6 +116,7 @@ ModernWoWRenderer/
 ├── ModernWoWRenderer.cpp      # D3D9 proxy DLL exports & main hook dispatch
 ├── VolumeIntegration.h        # Volumetric lighting & atmospheric pipeline
 ├── VolumeEffects.h            # HLSL shaders (god rays, radial blur, height fog, contact shadows)
+├── NativeShadowDiagnostics.h  # Native cascaded shadow map enhancement (softness/strength)
 ├── WaterEffect.h              # Water replacement shaders and vertex displacement
 ├── WaterReflection.h          # Screen-space reflections (SSR)
 ├── WaterHighlight.h           # Water specular glint
@@ -145,8 +149,11 @@ ModernWoWRenderer/
   - `MathTypes`, `FrameContext`, `ShaderCache`, `RendererDiagnostics`
   - `DepthCapture` INTZ extraction & `CameraCapture` matrix extraction
   - `DrawCallClassifier` with pipeline state caching
-- [ ] **Phase 2: Shadow & Ambient Occlusion Modernization**
-  - True Cascaded Shadow Maps (CSM) with light-space orthographic frustums
+- [x] **Phase 2a: Native Shadow Enhancement**
+  - Enhances WoW's own 4-cascade shadow maps (softness, strength) instead of
+    reconstructing shadows from screen-space depth or replaying light-space geometry
+  - Shadow distance/fade control not yet implemented
+- [ ] **Phase 2b: Ambient Occlusion**
   - Ground Truth Ambient Occlusion (GTAO) / Horizon-Based Ambient Occlusion (HBAO)
 - [ ] **Phase 3: Screen-Space Reflections (SSR) & Water Overhaul**
   - Hi-Z depth tracing / temporal reprojection for reflections
