@@ -233,6 +233,7 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
     float foamAmount=(shore+waveFoam*foreverStyle.w)*crest*waterStyle.z;
     rgb+=float3(.42,.48,.43)*foamAmount;
+    if(flowControl.z>1.5)return float4(saturate(pathEnergy*3).xxx,1);
     if(flowControl.z>.5)return float4(1,0,1,1);
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
@@ -263,7 +264,11 @@ void ReloadTuning(){
     fresnelStrength=std::clamp(ReadTuning(L"FresnelPercent",100),0,200)*.01f;
     crestFoamStrength=std::clamp(ReadTuning(L"CrestFoamPercent",20),0,100)*.01f;
     geometryWaveAmplitude=std::clamp(ReadTuning(L"GeometryWavePercent",10),0,35)*.01f;
-    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,1));
+    // 0=off, 1=solid magenta (confirms this pixel is our water shader),
+    // 2=grayscale celestial-glint term only (x3 gain), isolated from the
+    // rest of the water shading - for debugging "the sun path isn't
+    // showing" without guessing which term is actually zero.
+    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
     if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" debug="<<waterDebugMode<<'\n';}
 }
 void Configure(const std::wstring& base) {
