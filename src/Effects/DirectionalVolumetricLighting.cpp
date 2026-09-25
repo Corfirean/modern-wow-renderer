@@ -231,7 +231,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float sky=smoothstep(.9985,.9999,raw);
  float z=raw>=.9999?distanceInfo.z:distanceInfo.y/(raw-distanceInfo.x);
  z=lerp(min(max(z,0),distanceInfo.z),distanceInfo.z,sky);
- float horizonGradient=saturate(z/max(distanceInfo.z,1.0));
+ // Ramp across the first ~5%-45% of FOG DISTANCE, not the whole range -
+ // a straight z/maxDistance ratio only handed density/distance real
+ // influence over the last few percent right at the edge, which is why
+ // those sliders barely seemed to do anything: almost the entire visible
+ // water surface was in the fully-excluded zone. This keeps a small clear
+ // buffer close to the camera and gives them the rest of the view back.
+ float horizonGradient=smoothstep(.05,.45,z/max(distanceInfo.z,1.0));
  float isWater=saturate(tex2D(waterMask,uv).r)*(1-horizonGradient);
  result=lerp(result,scene.rgb,isWater);
  return float4(result,scene.a);
