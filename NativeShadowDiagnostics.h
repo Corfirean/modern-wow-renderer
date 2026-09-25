@@ -26,6 +26,7 @@ struct TargetRecord
     uint64_t lastProducerFrame = 0;
     uint32_t lastProducerDraw = 0;
     bool reuseLogged = false;
+    bool depthTarget = false;
 };
 
 inline bool enabled = false;
@@ -40,6 +41,9 @@ inline UINT backBufferHeight = 0;
 inline const void* currentRtTexture = nullptr;
 inline D3DSURFACE_DESC currentRtDesc{};
 inline bool currentRtValid = false;
+inline const void* currentDsTexture = nullptr;
+inline D3DSURFACE_DESC currentDsDesc{};
+inline bool currentDsValid = false;
 inline std::vector<TargetRecord> targets;
 inline std::unordered_set<uint64_t> loggedSignatures;
 inline uint32_t candidateDrawsThisFrame = 0;
@@ -133,6 +137,8 @@ inline void Reset()
     drawOrdinal = 0;
     currentRtTexture = nullptr;
     currentRtValid = false;
+    currentDsTexture = nullptr;
+    currentDsValid = false;
     targets.clear();
     loggedSignatures.clear();
     candidateDrawsThisFrame = 0;
@@ -159,10 +165,35 @@ inline void OnSetRenderTarget(DWORD index, IDirect3DSurface9* surface)
     TargetRecord* record = FindTarget(currentRtTexture);
     if (!record)
     {
-        targets.push_back({ currentRtTexture, desc.Width, desc.Height, desc.Format });
+        targets.push_back({ currentRtTexture, desc.Width, desc.Height, desc.Format, 0, 0, 0, 0, false, false });
         record = &targets.back();
         std::ostringstream s;
         s << "[RT_DISCOVER] frame=" << frame << " texture=" << currentRtTexture
+          << " size=" << desc.Width << 'x' << desc.Height
+          << " format=" << FormatName(desc.Format) << '(' << unsigned(desc.Format) << ")\n";
+        Append(s.str());
+    }
+}
+
+inline void OnSetDepth(IDirect3DSurface9* surface)
+{
+    if (!enabled) return;
+    currentDsTexture = nullptr;
+    currentDsValid = false;
+    if (!surface) return;
+    D3DSURFACE_DESC desc{};
+    if (FAILED(surface->GetDesc(&desc))) return;
+    currentDsDesc = desc;
+    currentDsValid = true;
+    currentDsTexture = TextureContainer(surface);
+    if (!currentDsTexture) return;
+
+    TargetRecord* record = FindTarget(currentDsTexture);
+    if (!record)
+    {
+        targets.push_back({ currentDsTexture, desc.Width, desc.Height, desc.Format, 0, 0, 0, 0, false, true });
+        std::ostringstream s;
+        s << "[DS_DISCOVER] frame=" << frame << " texture=" << currentDsTexture
           << " size=" << desc.Width << 'x' << desc.Height
           << " format=" << FormatName(desc.Format) << '(' << unsigned(desc.Format) << ")\n";
         Append(s.str());
@@ -183,6 +214,7 @@ inline void OnSetTexture(DWORD stage, IDirect3DBaseTexture9* texture)
       << " stage=s" << stage << " texture=" << texture
       << " size=" << record->width << 'x' << record->height
       << " format=" << FormatName(record->format)
+      << " role=" << (record->depthTarget ? "depth" : "color")
       << " producer_frame=" << record->lastProducerFrame
       << " producer_draw=" << record->lastProducerDraw
       << " producer_vs=0x" << std::hex << record->lastProducerVs
@@ -244,6 +276,7 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     signature = Mix(signature, vsHash); signature = Mix(signature, psHash);
     signature = Mix(signature, currentRtDesc.Width); signature = Mix(signature, currentRtDesc.Height);
     signature = Mix(signature, uint32_t(currentRtDesc.Format)); signature = Mix(signature, colorWrite);
+    signature = Mix(signature, reinterpret_cast<uintptr_t>(currentDsTexture));
     const uint64_t stateBits = uint64_t(alphaBlend) | (uint64_t(alphaTest) << 1) |
         (uint64_t(zEnable) << 2) | (uint64_t(zWrite) << 3);
     signature = Mix(signature, stateBits);
@@ -252,6 +285,16 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     if (currentRtTexture)
     {
         if (TargetRecord* record = FindTarget(currentRtTexture))
+        {
+            record->lastProducerVs = vsHash;
+            record->lastProducerPs = psHash;
+            record->lastProducerFrame = frame;
+            record->lastProducerDraw = drawOrdinal;
+        }
+    }
+    if (currentDsTexture)
+    {
+        if (TargetRecord* record = FindTarget(currentDsTexture))
         {
             record->lastProducerVs = vsHash;
             record->lastProducerPs = psHash;
@@ -282,7 +325,8 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
           << "  RT=" << currentRtDesc.Width << 'x' << currentRtDesc.Height << ' ' << FormatName(currentRtDesc.Format)
           << '(' << unsigned(currentRtDesc.Format) << ") texture=" << currentRtTexture << "\n"
           << "  DS=" << depthDesc.Width << 'x' << depthDesc.Height << ' ' << FormatName(depthDesc.Format)
-          << '(' << unsigned(depthDesc.Format) << ") viewport={" << viewport.X << ',' << viewport.Y << ','
+          << '(' << unsigned(depthDesc.Format) << ") texture=" << currentDsTexture
+          << " viewport={" << viewport.X << ',' << viewport.Y << ','
           << viewport.Width << ',' << viewport.Height << ',' << viewport.MinZ << ',' << viewport.MaxZ << "}\n"
           << "  state colorWrite=0x" << std::hex << colorWrite << std::dec
           << " alphaBlend=" << alphaBlend << " src=" << srcBlend << " dst=" << dstBlend
