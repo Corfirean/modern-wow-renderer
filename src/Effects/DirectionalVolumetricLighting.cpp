@@ -39,6 +39,19 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  return raw.xxxx;
 })HLSL";
 
+// Debug-only: visualize kBoundarySource's output directly as linear
+// distance, normalized by max fog distance. Over water this must read as
+// the SURFACE distance, not the seabed - a quick way to confirm the water
+// depth MRT write is actually reaching the atmosphere pass.
+const char* kBoundaryDebugSource = R"HLSL(
+sampler2D boundaryDepth:register(s0);
+float4 projection:register(c0); // x=A,y=B,z=maxDistance
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+ float raw=tex2D(boundaryDepth,uv).r;
+ float z=raw>=.9999?projection.z:projection.y/(raw-projection.x);
+ return saturate(z/max(projection.z,1.0)).xxxx;
+})HLSL";
+
 const char* kDepthSource = R"HLSL(
 sampler2D fullDepth:register(s0);
 float4 texel:register(c0);
@@ -290,7 +303,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // retired full-res analytic shader (e.g. 8), which would read here as
  // "almost no fog" and silently gut this pass. New key, own default.
  m_settings.fogWash=std::clamp(read(L"AtmosphereWashPercent",55),0,100)*.01f;
- m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,11));
+ m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
  m_historyValid=false;
 }
 
@@ -300,14 +313,14 @@ void DirectionalVolumetricLighting::Reset(IDirect3DDevice9* device)
  m_integratedSurface.Reset();m_integratedTexture.Reset();m_upsampledSurface.Reset();m_upsampledTexture.Reset();
  m_boundarySurface.Reset();m_boundaryTexture.Reset();
  for(int i=0;i<2;++i){m_historySurface[i].Reset();m_historyTexture[i].Reset();m_depthSurface[i].Reset();m_depthTexture[i].Reset();}
- m_depthShader.Reset();m_integrateShader.Reset();m_temporalShader.Reset();m_upsampleShader.Reset();m_compositeShader.Reset();m_boundaryShader.Reset();
+ m_depthShader.Reset();m_integrateShader.Reset();m_temporalShader.Reset();m_upsampleShader.Reset();m_compositeShader.Reset();m_boundaryShader.Reset();m_boundaryDebugShader.Reset();
  m_owner=nullptr;m_fullWidth=m_fullHeight=m_lowWidth=m_lowHeight=0;m_targetFormat=D3DFMT_UNKNOWN;m_historyValid=false;m_previousViewValid=false;
 }
 
 bool DirectionalVolumetricLighting::EnsureShaders(IDirect3DDevice9* d)
 {
- if(m_depthShader&&m_integrateShader&&m_temporalShader&&m_upsampleShader&&m_compositeShader&&m_boundaryShader)return true;
- return Compile(d,kDepthSource,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_boundaryShader.GetAddressOf());
+ if(m_depthShader&&m_integrateShader&&m_temporalShader&&m_upsampleShader&&m_compositeShader&&m_boundaryShader&&m_boundaryDebugShader)return true;
+ return Compile(d,kDepthSource,m_depthShader.GetAddressOf())&&Compile(d,kIntegrateSource,m_integrateShader.GetAddressOf())&&Compile(d,kTemporalSource,m_temporalShader.GetAddressOf())&&Compile(d,kUpsampleSource,m_upsampleShader.GetAddressOf())&&Compile(d,kCompositeSource,m_compositeShader.GetAddressOf())&&Compile(d,kBoundarySource,m_boundaryShader.GetAddressOf())&&Compile(d,kBoundaryDebugSource,m_boundaryDebugShader.GetAddressOf());
 }
 
 bool DirectionalVolumetricLighting::EnsureResources(IDirect3DDevice9* d,uint32_t w,uint32_t h,D3DFORMAT format)
@@ -358,6 +371,13 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   d->SetPixelShaderConstantF(0,f.projUnpack,1);
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
+ }
+ if(m_settings.debugMode==VolumetricDebugMode::BoundaryDepth){
+  d->SetRenderTarget(0,target);d->SetPixelShader(m_boundaryDebugShader.Get());d->SetTexture(0,m_boundaryTexture.Get());
+  d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
+  float c0[4]={f.projUnpack[0],f.projUnpack[1],m_settings.maxDistance,0};d->SetPixelShaderConstantF(0,c0,1);
+  DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);
+  return true;
  }
  d->SetViewport(&low);d->SetRenderTarget(0,m_depthSurface[write].Get());d->SetPixelShader(m_depthShader.Get());d->SetTexture(0,m_boundaryTexture.Get());float depthTexel[4]={.5f/m_fullWidth,.5f/m_fullHeight,0,0};d->SetPixelShaderConstantF(0,depthTexel,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);d->SetTexture(0,nullptr);
  {

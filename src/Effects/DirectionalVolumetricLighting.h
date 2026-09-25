@@ -12,7 +12,13 @@ namespace renderer
     {
         None = 0, OpticalDepth, Transmission, TotalDensity, HeightDensity,
         GroundMistDensity, NoiseDensity, AmbientInscatter, CelestialInscatter,
-        RawLowResolution, Temporal, Upsampled
+        RawLowResolution, Temporal, Upsampled,
+        // Raw boundary depth itself (pre-integration): scene depth
+        // everywhere, water surface depth wherever water covers a pixel.
+        // Over water this must show the SURFACE distance, not the seabed -
+        // if it still shows seabed distance, the water depth MRT write
+        // isn't reaching this texture and the fix isn't actually engaging.
+        BoundaryDepth
     };
 
     struct VolumetricSettings
@@ -96,6 +102,7 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_upsampleShader;
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_boundaryShader;
+        ComPtr<IDirect3DPixelShader9> m_boundaryDebugShader;
         Vec3 m_previousCamera{};
         float m_previousProjection[4]{};
         Matrix4 m_previousView{};
