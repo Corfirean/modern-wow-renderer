@@ -37,6 +37,13 @@ namespace renderer
         bool temporalEnabled = true;
         float temporalBlend = 0.88f;
         bool edgeAwareBilateral = true;
+        // Halo around the confirmed sun/moon disc, inside the haze itself -
+        // independent of the screen-space god-ray shaft pass. 0 = no halo.
+        float sunGlowStrength = 0.8f;
+        // How strongly the atmosphere replaces/dims the scene behind it vs
+        // letting it show through. Lower preserves distant detail (e.g.
+        // open water) instead of washing it to a flat colour.
+        float fogWash = 0.55f;
         VolumetricDebugMode debugMode = VolumetricDebugMode::None;
     };
 

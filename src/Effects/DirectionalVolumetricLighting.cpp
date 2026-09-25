@@ -41,7 +41,14 @@ float noiseAt(float3 p) {
 }
 float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float raw=tex2D(depthMap,uv).r;
- float sky=smoothstep(.9985,.9999,raw);
+ // Only the true background clear value (nothing drawn there at all) counts
+ // as sky. The old (.9985,.9999) window also caught real far geometry -
+ // most visibly open water stretching to the horizon, which never writes a
+ // clean depth and reads close to 1 well before the actual far plane. Those
+ // pixels were snapped to maxDistance below and got full aerial density,
+ // which is what erased the water into a flat grey wall at a fixed radius
+ // instead of fading it in with its own real distance.
+ float sky=smoothstep(.99990,.99999,raw);
  float z=projection.y/(raw-projection.x);
  z=lerp(clamp(z,0,distanceTuning.y),distanceTuning.y,sky);
  float3 view=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1);
@@ -166,11 +173,14 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 
 const char* kCompositeSource = R"HLSL(
 sampler2D sceneMap:register(s0); sampler2D atmosphereMap:register(s1); sampler2D depthMap:register(s2);
+// x=debug passthrough, y=wash strength (how much fog is allowed to replace
+// the scene behind it vs let it show through)
 float4 tuning:register(c0); float4 sourceScreen:register(c1);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float4 a=tex2D(atmosphereMap,uv); if(tuning.x>.5)return float4(a.rgb,1);
  float4 scene=tex2D(sceneMap,uv);
- float3 result=scene.rgb*(1-saturate(a.a))+a.rgb;
+ float wash=tuning.y; float aa=saturate(a.a)*wash;
+ float3 result=scene.rgb*(1-aa)+a.rgb*wash;
  // Preserve the game's own sun disc luminance. Atmosphere supplies the halo,
  // not a second emitter painted over the sprite. The sky-depth gate prevents
  // this protection mask from punching through foreground occluders.
@@ -213,6 +223,16 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_settings.moonStrength=std::clamp(read(L"MoonVolumetricStrengthPercent",16),0,40)*.01f;
  m_settings.temporalEnabled=read(L"AtmosphereTemporalEnabled",1)!=0;
  m_settings.temporalBlend=std::clamp(read(L"AtmosphereTemporalPercent",88),0,95)*.01f;
+ // Same keys the tuning overlay's SUN GLOW / FOG WASH sliders write - this
+ // is the pipeline that actually renders the sun halo and the composited
+ // fog now, so it must be the one reading them, not the retired full-res
+ // analytic shader these keys used to belong to.
+ m_settings.sunGlowStrength=std::clamp(read(L"SunGlowPercent",80),0,300)*.01f;
+ // Deliberately NOT the old "FogWashPercent" key - that one is still on
+ // disk in deployed GraphicsEffects.ini copies at values tuned for the
+ // retired full-res analytic shader (e.g. 8), which would read here as
+ // "almost no fog" and silently gut this pass. New key, own default.
+ m_settings.fogWash=std::clamp(read(L"AtmosphereWashPercent",55),0,100)*.01f;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,11));
  m_historyValid=false;
 }
@@ -276,7 +296,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   float intensity=f.celestialIntensity*(f.celestialIsMoon?m_settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
   float c2[4]={.36f,.46f,.58f,m_settings.aerialDensity*m_settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,m_settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
-  float c8[4]={m_settings.aerialStart,m_settings.maxDistance,float(m_settings.sampleCount),0};float c9[4]={f.cameraPosition.z+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={f.cameraPosition.z+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={32.f,220.f,.25f,.75f};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
+  float c8[4]={m_settings.aerialStart,m_settings.maxDistance,float(m_settings.sampleCount),0};float c9[4]={f.cameraPosition.z+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={f.cameraPosition.z+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*m_settings.sunGlowStrength,.75f*m_settings.sunGlowStrength};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);
  }
  IDirect3DTexture9* atmosphere=m_integratedTexture.Get();bool historyOk=ValidateHistory(f);
@@ -286,7 +306,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,f.depthTexture);d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],m_settings.maxDistance,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,0,0,0};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,f.depthTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,m_settings.fogWash,0,0};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
  }
  m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;m_previousWasMoon=f.celestialIsMoon;m_previousCelestialIntensity=f.celestialIntensity;return true;
 }

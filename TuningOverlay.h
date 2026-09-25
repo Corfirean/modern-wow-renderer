@@ -21,6 +21,8 @@ inline std::vector<Item> items={
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereQuality","ATMOSPHERE QUALITY",0,2,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
+ {KIND_SLIDER,L"Atmosphere",L"AtmosphereMaxDistance","FOG DISTANCE",200,1200,20,520},
+ {KIND_SLIDER,L"Atmosphere",L"AtmosphereWashPercent","FOG WASH",0,100,2,55},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
@@ -51,32 +53,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"GammaPercent","GAMMA",50,180,2,100},
- {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35},
-
- // === DEBUG (developer-only: unverified / known-broken features) ===
- {KIND_HEADER,nullptr,nullptr,"--- DEBUG - DO NOT USE IN PRODUCTION ---",0,0,0,0},
- {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMarker","SUN/MOON MARKER (RED=v24)",0,1,1,0},
- // RED=legacy v[24] projection, GREEN=memory-probe sun candidate,
- // CYAN=memory-probe moon candidate. See CelestialMemoryProbe.h - the
- // addresses/selection logic are an unverified third-party-derived
- // hypothesis, this toggle exists to visually prove or disprove them.
- {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialMemoryProbe","+ MEMORY PROBE (GREEN/CYAN)",0,1,1,0},
- // Tints the F9-found candidate draw (fixed-function, zero-translation
- // VIEW = skybox trick, large-scale WORLD billboard) magenta, live. If it
- // lands on the real sun/moon disc, the classification is confirmed.
- {KIND_TOGGLE,L"Atmosphere",L"DebugCelestialCandidateHighlight","CANDIDATE HIGHLIGHT (MAGENTA)",0,1,1,0},
- // Hidden fallback only: the real sun/moon screen position now comes from
- // the light direction + projection, not from these. Leave at neutral
- // (100/0/0) unless the marker above proves the projection itself is off.
- // NOTE: in-game testing (see PR #1 review) shows the marker itself does not
- // reliably track the rendered disc yet - this projection is still under
- // investigation, these sliders are not a working substitute.
- {KIND_SLIDER,L"Atmosphere",L"SunVerticalProjectionPercent","SUN VERT SCALE (DEBUG)",10,100,2,100},
- {KIND_SLIDER,L"Atmosphere",L"SunOffsetXPercent","SUN OFFSET X (DEBUG)",-50,50,1,0},
- {KIND_SLIDER,L"Atmosphere",L"SunOffsetYPercent","SUN OFFSET Y (DEBUG)",-50,50,1,0},
- // Not independently profiled; previously reported to drop the game to
- // single-digit / sub-1 FPS. Kept out of the normal overlay until measured.
- {KIND_TOGGLE,L"Atmosphere",L"DirectionalVolumetricEnabled","VOLUMETRIC RAYMARCH (UNPROFILED)",0,1,1,0}
+ {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35}
 };
 inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(GetPrivateProfileIntW(i.section,i.key,i.value,ini.c_str())),i.lo,i.hi);}}
 inline void Save(Item& i){if(i.kind==KIND_HEADER)return;wchar_t b[32]{};_itow_s(i.value,b,10);WritePrivateProfileStringW(i.section,i.key,b,ini.c_str());}
