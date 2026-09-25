@@ -51,7 +51,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float horizon=lerp(1,lerp(.34,1,saturate(1-abs(ray.z)*1.7)),sky);
  int count=(int)distanceTuning.z; float stepLength=marchDistance/max((float)count,1);
  float jitter=frac(52.9829189*frac(dot(vpos,float2(.06711056,.00583715))+frameTuning.x*.071));
- float cosTheta=dot(ray,normalize(celestial.xyz));
+ // CelestialTracker's view-space vector is captured from the same billboard
+ // projection as this pixel. Comparing in view space avoids mixing its D3D
+ // fixed-function matrix convention with CameraCapture's shader matrices.
+ float cosTheta=dot(viewRay,normalize(celestial.xyz));
  float phase=phaseTuning.z*HG(cosTheta,phaseTuning.x)+phaseTuning.w*HG(cosTheta,phaseTuning.y);
  float T=1, optical=0, densitySum=0, heightSum=0, mistSum=0, noiseSum=0;
  float3 ambientSum=0, directSum=0;
@@ -92,14 +95,24 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  if(sky>.5) {
    float3 vr=normalize(float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1));
    float3 wr=normalize(vr.x*inv0.xyz+vr.y*inv1.xyz+vr.z*inv2.xyz);
-   float3 pv=float3(dot(wr,prev0.xyz),dot(wr,prev1.xyz),dot(wr,prev2.xyz));
+   // Row-vector D3D convention: world * view. The shader constants contain
+   // matrix rows, therefore each output component is one matrix column.
+   float3 pv=float3(
+     wr.x*prev0.x+wr.y*prev1.x+wr.z*prev2.x,
+     wr.x*prev0.y+wr.y*prev1.y+wr.z*prev2.y,
+     wr.x*prev0.z+wr.y*prev1.z+wr.z*prev2.z);
    if(pv.z<=.02)return cur;
    prevUv=float2(.5+.5*pv.x/pv.z*prevProjection.z,.5-.5*pv.y/pv.z*prevProjection.w);
+   // Never pull bright sky history across a moving geometry silhouette.
+   if(tex2D(historyDepth,prevUv).r<.999)return cur;
  } else {
    float z=projection.y/(raw-projection.x);
    float3 vp=float3((uv.x*2-1)/projection.z,(1-uv.y*2)/projection.w,1)*z;
    float3 wp=camera.xyz+vp.x*inv0.xyz+vp.y*inv1.xyz+vp.z*inv2.xyz;
-   float3 pv=float3(dot(wp,prev0.xyz)+prev3.x,dot(wp,prev1.xyz)+prev3.y,dot(wp,prev2.xyz)+prev3.z);
+   float3 pv=float3(
+     wp.x*prev0.x+wp.y*prev1.x+wp.z*prev2.x+prev3.x,
+     wp.x*prev0.y+wp.y*prev1.y+wp.z*prev2.y+prev3.y,
+     wp.x*prev0.z+wp.y*prev1.z+wp.z*prev2.z+prev3.z);
    if(pv.z<=.02)return cur;
    prevUv=float2(.5+.5*pv.x/pv.z*prevProjection.z,.5-.5*pv.y/pv.z*prevProjection.w);
    float oldRaw=tex2D(historyDepth,prevUv).r;
@@ -120,9 +133,20 @@ sampler2D lowMap:register(s0); sampler2D fullDepth:register(s1); sampler2D lowDe
 float4 texels:register(c0); float4 projection:register(c1); float4 tuning:register(c2);
 float Linear(float r){return r>=.999?projection.z:projection.y/(r-projection.x);}
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
- float2 o[4]={float2(-.5,-.5),float2(.5,-.5),float2(-.5,.5),float2(.5,.5)};
+ float2 o[4]={float2(0,0),float2(1,0),float2(0,1),float2(1,1)};
+ float2 lowSize=1/texels.zw;
+ float2 lowPixel=uv*lowSize-.5;
+ float2 base=floor(lowPixel),fraction=frac(lowPixel);
  float full=Linear(tex2D(fullDepth,uv).r),sum=0; float4 result=0; float best=1e9; float4 nearest=0;
- [unroll]for(int i=0;i<4;++i){float2 q=uv+o[i]*texels.zw;float z=Linear(tex2D(lowDepth,q).r);float d=abs(full-z);float w=exp(-d/max(1,full*.018));float4 c=tex2D(lowMap,q);result+=c*w;sum+=w;if(d<best){best=d;nearest=c;}}
+ [unroll]for(int i=0;i<4;++i){
+   float2 q=(base+o[i]+.5)*texels.zw;
+   float z=Linear(tex2D(lowDepth,q).r); float d=abs(full-z);
+   float2 axisWeight=1-abs(o[i]-fraction);
+   float spatial=max(axisWeight.x*axisWeight.y,.001);
+   float w=spatial*exp(-d/max(.35,full*.012));
+   float4 c=tex2D(lowMap,q); result+=c*w; sum+=w;
+   if(d<best){best=d;nearest=c;}
+ }
  result=sum>.05?result/sum:nearest;
  if(tuning.x>10.5)return float4(result.rgb,1); return result;
 })HLSL";
@@ -227,7 +251,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereIntegrate);d->SetRenderTarget(0,m_integratedSurface.Get());d->SetPixelShader(m_integrateShader.Get());d->SetTexture(0,m_depthTexture[write].Get());d->SetTexture(1,f.atmosphereNoise);
   for(DWORD s=0;s<2;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);}
   float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,1};d->SetPixelShaderConstantF(0,c0,1);
-  float intensity=f.celestialIntensity*(f.celestialIsMoon?m_settings.moonStrength:1.f);float c1[4]={f.sunDirectionWorld.x,f.sunDirectionWorld.y,f.sunDirectionWorld.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
+  float intensity=f.celestialIntensity*(f.celestialIsMoon?m_settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
   float c2[4]={.36f,.46f,.58f,m_settings.aerialDensity*m_settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,m_settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
   float c8[4]={m_settings.aerialStart,m_settings.maxDistance,float(m_settings.sampleCount),0};float c9[4]={f.cameraPosition.z+m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={f.cameraPosition.z+m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/140.f,1.f/28.f,.30f,.18f};float c12[4]={.52f,.86f,.34f,.66f};float c13[4]={float(f.frameIndex%100000),float(uint32_t(m_settings.debugMode)),0,0};
@@ -237,7 +261,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  const bool runTemporal=m_settings.temporalEnabled&&(m_settings.debugMode==VolumetricDebugMode::None||m_settings.debugMode==VolumetricDebugMode::Temporal||m_settings.debugMode==VolumetricDebugMode::Upsampled);
  if(runTemporal){ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereTemporal);d->SetRenderTarget(0,m_historySurface[write].Get());d->SetPixelShader(m_temporalShader.Get());d->SetTexture(0,m_integratedTexture.Get());d->SetTexture(1,m_historyTexture[m_historyReadIndex].Get());d->SetTexture(2,m_depthTexture[write].Get());d->SetTexture(3,m_depthTexture[m_historyReadIndex].Get());for(DWORD s=0;s<4;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);}float c0[4]={1.f/m_lowWidth,1.f/m_lowHeight,m_settings.temporalBlend,historyOk?1.f:0.f};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,f.projUnpack,1);float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(2,inv[0],3);float cam[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};d->SetPixelShaderConstantF(5,cam,1);d->SetPixelShaderConstantF(6,&m_previousView.m[0][0],4);d->SetPixelShaderConstantF(10,m_previousProjection,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);atmosphere=m_historyTexture[write].Get();}
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,f.depthTexture);d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s?D3DTEXF_POINT:D3DTEXF_LINEAR);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s?D3DTEXF_POINT:D3DTEXF_LINEAR);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],f.depthMaxZ,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,f.depthTexture);d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],m_settings.maxDistance,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,0,0,0};d->SetPixelShaderConstantF(0,debug,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);
