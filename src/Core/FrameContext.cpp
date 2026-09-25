@@ -34,6 +34,8 @@ namespace renderer
         sunScreenX = -1.0f;
         sunScreenY = -1.0f;
         sunStrength = 0.0f;
+        celestialIntensity = 0.0f;
+        celestialIsMoon = false;
 
         projUnpack[0] = projUnpack[1] = projUnpack[2] = projUnpack[3] = 0.0f;
         depthMaxZ = 1.0f;
@@ -49,6 +51,7 @@ namespace renderer
         depthSurface = nullptr;
         sceneColor = nullptr;
         sceneSurface = nullptr;
+        atmosphereNoise = nullptr;
 
         depthAvailable = false;
         cameraValid = false;

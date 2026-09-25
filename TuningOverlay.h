@@ -19,11 +19,8 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,400,5,160},
  {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,200,5,80},
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
- {KIND_TOGGLE,L"DistanceFog",L"Enabled","DISTANCE HAZE",0,1,1,1},
+ {KIND_SLIDER,L"Atmosphere",L"AtmosphereQuality","ATMOSPHERE QUALITY",0,2,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
- {KIND_SLIDER,L"Atmosphere",L"BaseHeight","FOG BASE HEIGHT",-50,200,2,28},
- {KIND_SLIDER,L"Atmosphere",L"FogWashPercent","FOG WASH",0,100,2,35},
- {KIND_SLIDER,L"Atmosphere",L"GroundMistDensityPermille","GROUND MIST",0,40,1,8},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},

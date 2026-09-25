@@ -716,10 +716,18 @@ bool Composite(IDirect3DDevice9* d) {
             frameCtx.sunStrength = constants[2][2];
             frameCtx.sunDirectionView = body->viewSpaceDirection;
             frameCtx.sunDirectionWorld = body->worldSpaceDirection;
+            // Source kind and visibility come from CelestialTracker. The
+            // atmosphere owns the sun/moon intensity ratio, so keep this a
+            // normalized visibility signal instead of applying moon strength
+            // twice (once here and once in the medium integration).
+            frameCtx.celestialIntensity = 1.f;
+            frameCtx.celestialIsMoon = useMoon;
         } else {
             frameCtx.sunScreenX = -1.f;
             frameCtx.sunScreenY = -1.f;
             frameCtx.sunStrength = 0.f;
+            frameCtx.celestialIntensity = 0.f;
+            frameCtx.celestialIsMoon = false;
         }
     }
 
@@ -738,6 +746,7 @@ bool Composite(IDirect3DDevice9* d) {
     auto& frameCtx = renderer::FrameContext::Current();
     frameCtx.sceneColor = legacyTargets.scene.Get();
     frameCtx.sceneSurface = legacyTargets.sceneSurface.Get();
+    frameCtx.atmosphereNoise = resources.noise.Get();
 
     // Lightweight scoped render state backup (NO D3DSBT_ALL)
     renderer::ScopedRenderState scopedState(d);
@@ -846,19 +855,9 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetPixelShaderConstantF(0, constants[0], 14));
     }
 
-    // Atmospheric Height Fog
-    if (!shaftDebug && fogEffectEnabled) {
-        renderer::ScopedCpuTimer fogTimer(renderer::PerfStage::HeightFog);
-        float fogMode[4] = { 3, constants[8][1], 0, 0 };
-        check(d->SetPixelShaderConstantF(8, fogMode, 1));
-        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
-        check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
-        check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
-        if (ok) drawQuad(desc.Width, desc.Height);
-    }
-
-    // Directional Volumetric Lighting (World-Space Raymarch)
-    if (shaftsEffectEnabled)
+    // Dedicated low-resolution atmosphere. This replaces the old full-res
+    // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
+    if (!shaftDebug && fogEffectEnabled)
         renderer::DirectionalVolumetricLighting::Instance().Render(d, renderer::FrameContext::Current(), target.Get());
 
     // Secondary Sun Radial Glare pass

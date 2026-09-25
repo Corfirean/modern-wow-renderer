@@ -10,91 +10,80 @@ namespace renderer
 
     enum class VolumetricDebugMode : uint32_t
     {
-        None = 0,
-        Raw = 1,
-        ShadowVisibility = 2,
-        Density = 3,
-        Phase = 4,
-        History = 5,
-        Upsample = 6
+        None = 0, OpticalDepth, Transmission, TotalDensity, HeightDensity,
+        GroundMistDensity, NoiseDensity, AmbientInscatter, CelestialInscatter,
+        RawLowResolution, Temporal, Upsampled
     };
 
     struct VolumetricSettings
     {
         bool enabled = true;
-        float strength = 1.0f;
-        float density = 1.0f;
-        float extinction = 0.8f;
-        float anisotropyG = 0.72f;
-        float maxDistance = 220.0f;
-        uint32_t sampleCount = 4;            // Compatibility default: 4 samples
-        uint32_t skySampleCount = 6;         // Default 6 samples for sky
-        float resolutionPercent = 12.0f;     // Compatibility default: 12% low-res buffer
+        uint32_t quality = 1;
+        uint32_t sampleCount = 6;
+        float resolutionScale = 0.25f;
+        float densityScale = 1.0f;
+        float maxDistance = 520.0f;
+        float aerialStart = 35.0f;
+        float aerialDensity = 0.002f;
+        float heightDensity = 0.005f;
+        float heightFalloff = 0.055f;
+        float fogBaseOffset = -6.0f;
+        float mistDensity = 0.009f;
+        float mistFalloff = 0.42f;
+        float mistBaseOffset = -3.0f;
+        float noiseAmount = 0.22f;
+        float extinction = 1.0f;
+        float moonStrength = 0.16f;
         bool temporalEnabled = true;
-        float temporalBlend = 0.80f;
-        bool shadowEnabled = true;
-        bool shadowPCF = false;              // Default false = fast 1-tap shadow fetch
-        uint32_t shadowStride = 2;           // Interleaved shadow lookup: fetch every 2 steps
-        float shadowBias = 0.0015f;
-        bool jitterEnabled = true;
-        float moonStrength = 0.25f;
+        float temporalBlend = 0.88f;
         bool edgeAwareBilateral = true;
         VolumetricDebugMode debugMode = VolumetricDebugMode::None;
-
-        // Height density tuning
-        float baseHeight = 0.0f;
-        float heightFalloff = 0.005f;
-        float lowLayer = 0.2f;
     };
 
+    // Historical class name retained to avoid unrelated API churn. This is
+    // the dedicated production atmosphere pipeline, not the old shadow march.
     class DirectionalVolumetricLighting
     {
     public:
         static DirectionalVolumetricLighting& Instance();
-
         void Configure(const std::wstring& basePath);
         void Reset(IDirect3DDevice9* device);
-
-        // Executes the raymarch, temporal, and merged upsample-composite passes
         bool Render(IDirect3DDevice9* device, const FrameContext& frameContext, IDirect3DSurface9* targetSurface);
-
         VolumetricSettings& Settings() { return m_settings; }
         const VolumetricSettings& Settings() const { return m_settings; }
-
-        IDirect3DTexture9* GetRaymarchTexture() const { return m_raymarchTexture.Get(); }
+        IDirect3DTexture9* GetRaymarchTexture() const { return m_integratedTexture.Get(); }
 
     private:
         DirectionalVolumetricLighting() = default;
-
         bool EnsureShaders(IDirect3DDevice9* device);
-        bool EnsureResources(IDirect3DDevice9* device, uint32_t fullWidth, uint32_t fullHeight);
+        bool EnsureResources(IDirect3DDevice9* device, uint32_t fullWidth, uint32_t fullHeight, D3DFORMAT targetFormat);
         void DrawScreenQuad(IDirect3DDevice9* device, uint32_t width, uint32_t height);
+        bool ValidateHistory(const FrameContext& frameContext);
 
         VolumetricSettings m_settings;
-
         IDirect3DDevice9* m_owner = nullptr;
-        uint32_t m_fullWidth = 0;
-        uint32_t m_fullHeight = 0;
-        uint32_t m_lowWidth = 0;
-        uint32_t m_lowHeight = 0;
-
-        // Low-res render targets
-        ComPtr<IDirect3DTexture9> m_raymarchTexture;
-        ComPtr<IDirect3DSurface9> m_raymarchSurface;
-
-        ComPtr<IDirect3DTexture9> m_lowDepthTexture;
-        ComPtr<IDirect3DSurface9> m_lowDepthSurface;
-
-        // Temporal ping-pong history
+        uint32_t m_fullWidth = 0, m_fullHeight = 0, m_lowWidth = 0, m_lowHeight = 0;
+        D3DFORMAT m_targetFormat = D3DFMT_UNKNOWN;
+        ComPtr<IDirect3DTexture9> m_integratedTexture;
+        ComPtr<IDirect3DSurface9> m_integratedSurface;
         ComPtr<IDirect3DTexture9> m_historyTexture[2];
         ComPtr<IDirect3DSurface9> m_historySurface[2];
+        ComPtr<IDirect3DTexture9> m_depthTexture[2];
+        ComPtr<IDirect3DSurface9> m_depthSurface[2];
+        ComPtr<IDirect3DTexture9> m_upsampledTexture;
+        ComPtr<IDirect3DSurface9> m_upsampledSurface;
         uint32_t m_historyReadIndex = 0;
         bool m_historyValid = false;
-
-        // Persistent Shaders
-        ComPtr<IDirect3DPixelShader9> m_downsampleDepthShader;
-        ComPtr<IDirect3DPixelShader9> m_raymarchShader;
+        ComPtr<IDirect3DPixelShader9> m_depthShader;
+        ComPtr<IDirect3DPixelShader9> m_integrateShader;
         ComPtr<IDirect3DPixelShader9> m_temporalShader;
-        ComPtr<IDirect3DPixelShader9> m_upsampleCompositeShader;
+        ComPtr<IDirect3DPixelShader9> m_upsampleShader;
+        ComPtr<IDirect3DPixelShader9> m_compositeShader;
+        Vec3 m_previousCamera{};
+        float m_previousProjection[4]{};
+        Matrix4 m_previousView{};
+        bool m_previousViewValid = false;
+        bool m_previousWasMoon = false;
+        float m_previousCelestialIntensity = 0.0f;
     };
 }

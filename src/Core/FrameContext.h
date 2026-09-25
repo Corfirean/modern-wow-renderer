@@ -35,6 +35,11 @@ namespace renderer
         float sunScreenX = -1.0f;
         float sunScreenY = -1.0f;
         float sunStrength = 0.0f;
+        // Confirmed CelestialTracker source used by the atmosphere path.
+        // celestialIsMoon is deliberately explicit: colour is never used to
+        // guess which body is active.
+        float celestialIntensity = 0.0f;
+        bool celestialIsMoon = false;
 
         // Projection reconstruction parameters [P22, P32, P00, P11]
         float projUnpack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -68,6 +73,7 @@ namespace renderer
         IDirect3DSurface9* depthSurface = nullptr;
         IDirect3DTexture9* sceneColor = nullptr;
         IDirect3DSurface9* sceneSurface = nullptr;
+        IDirect3DTexture9* atmosphereNoise = nullptr;
 
         bool depthAvailable = false;
         bool cameraValid = false;

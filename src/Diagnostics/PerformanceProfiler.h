@@ -30,6 +30,10 @@ namespace renderer
     {
         ShadowMap = 0,
         DirectionalVolumetric,
+        AtmosphereIntegrate,
+        AtmosphereTemporal,
+        AtmosphereUpsample,
+        AtmosphereComposite,
         LegacyComposite,
         Water,
         TotalGpu,
