@@ -1,4 +1,5 @@
 #pragma once
+#include "NativeShadowDiagnostics.h"
 #include "VolumeEffects.h"
 #include <cstdio>
 #include <unordered_set>
@@ -359,7 +360,9 @@ void Reset(IDirect3DDevice9* d) {
 }
 
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d, IDirect3DSurface9* s) {
-    return renderer::DepthCapture::Instance().HookSetDepth(d, s);
+    const HRESULT hr = renderer::DepthCapture::Instance().HookSetDepth(d, s);
+    if (SUCCEEDED(hr) && !internal) nativeshadowdiag::OnSetDepth(s);
+    return hr;
 }
 HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** out) {
     return renderer::DepthCapture::Instance().HookGetDepth(d, out);

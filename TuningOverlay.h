@@ -54,10 +54,14 @@ inline std::vector<Item> items={
 
  // === DYNAMIC SHADOWS ===
  {KIND_HEADER,nullptr,nullptr,"--- DYNAMIC SHADOWS ---",0,0,0,0},
- {KIND_TOGGLE,L"Atmosphere",L"ShadowsEnabled","CONTACT SHADOW",0,1,1,1},
- {KIND_SLIDER,L"Atmosphere",L"DirectionalShadowPercent","SHADOW STRENGTH",0,100,5,45},
- {KIND_SLIDER,L"Atmosphere",L"ShadowMapDistance","SHADOW DIST",50,300,10,180},
- {KIND_SLIDER,L"Atmosphere",L"ContactShadowPercent","CONTACT SHADOW",0,60,2,25},
+ {KIND_TOGGLE,L"NativeShadows",L"Enabled","NATIVE SHADOWS",0,1,1,1},
+ {KIND_SLIDER,L"NativeShadows",L"SoftnessPercent","SHADOW SOFTNESS",50,220,5,145},
+ // SHADOW STRENGTH: c12 (the darkening constant) is a `def`-declared shader
+ // literal, so writing the constant register at runtime is a no-op - this
+ // slider instead swaps in a byte-patched COPY of the shader (only the two
+ // c12 floats changed, everything else byte-identical) for the 4 confirmed
+ // receiver hashes, restoring the original shader after the draw.
+ {KIND_SLIDER,L"NativeShadows",L"StrengthPercent","SHADOW STRENGTH",30,250,10,100},
 
  // === IMAGE & COLOR ===
  {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},

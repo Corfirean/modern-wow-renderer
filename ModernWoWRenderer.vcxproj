@@ -40,6 +40,7 @@ copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"</Command></PostB
     <ClInclude Include="src\Diagnostics\CelestialMemoryProbe.h" />
     <ClInclude Include="src\Diagnostics\CelestialDrawDiagnostics.h" />
     <ClInclude Include="src\D3D9\CelestialTracker.h" />
+    <ClInclude Include="NativeShadowDiagnostics.h" />
     <None Include="d3d9.def" />
     <None Include="ModernWoWRenderer.ini" />
     <None Include="GraphicsEffects.ini" />
