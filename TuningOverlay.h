@@ -56,10 +56,15 @@ inline std::vector<Item> items={
  {KIND_HEADER,nullptr,nullptr,"--- DYNAMIC SHADOWS ---",0,0,0,0},
  {KIND_TOGGLE,L"NativeShadows",L"Enabled","NATIVE SHADOWS",0,1,1,1},
  {KIND_SLIDER,L"NativeShadows",L"SoftnessPercent","SHADOW SOFTNESS",50,220,5,145},
- // Scales the native max-darkening constant (100% = native 0.3, i.e.
- // shadows never go below 70% brightness). Disassembly-verified on 4
- // confirmed receiver shaders only - see NativeShadowDiagnostics.h.
- {KIND_SLIDER,L"NativeShadows",L"StrengthPercent","SHADOW STRENGTH",30,250,10,100},
+ // SHADOW STRENGTH removed from the menu: c12 (the darkening constant it
+ // scaled) turned out to be a `def`-declared shader literal, not a
+ // runtime-uploaded constant - SetPixelShaderConstantF succeeds but the
+ // GPU ignores it and always uses the compiled-in 0.3/0.7. Confirmed live
+ // (0% difference between StrengthPercent 30 and 250). Would need to patch
+ // the shader bytecode itself to actually work - a materially riskier
+ // technique than anything else this round, not attempted here. The
+ // control logic stays in NativeShadowDiagnostics.h (harmless no-op) in
+ // case bytecode patching is worth doing later.
 
  // === IMAGE & COLOR ===
  {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},
