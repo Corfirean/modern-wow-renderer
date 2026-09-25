@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
+#include "src/D3D9/CelestialTracker.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 bool enabled=false, active=true, keyDown=false, hotkey=true;
@@ -143,13 +144,23 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float waterDepth=abs(behindZ-viewPos.z);
     float captureValid=reflectionStyle.w;
     float depthValid=captureValid*step(behindZ,99999);
+    // Open ocean has no seafloor within the depth buffer at all (behindRaw
+    // reads as sky), so depthValid was 0 here - which used to zero every
+    // absorption/tint term below AND still sample sceneTexture unmodified
+    // at screenUV as "refracted", i.e. literally paint raw sky colour onto
+    // the water. That is exactly what read as "the sea looks transparent"
+    // no matter how high DepthAbsorptionPercent was set: absorption was
+    // gated to zero regardless of the slider. No floor found means this is
+    // genuinely deep, not "not water" - treat it as maximum depth instead.
+    float openOcean=1-depthValid;
+    float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
     float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*(15+waterStyle.x*120);
     float2 refractUV=screenUV+(depthValid?refractOffset:float2(0,0));
-    float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
+    float3 refracted=depthValid>.5?tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb:float3(0,0,0);
     float shallow=saturate(waterDepth/max(waterStyle.w,1e-3));
     float3 deepTint=lerp(fogColor.rgb*.42,float3(.025,.105,.135),.62);
-    float absorption=depthValid*(1-exp(-waterDepth*waterStyle.y*.14));
-    float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),waterDepth);
+    float absorption=captureValid*(1-exp(-effectiveDepth*waterStyle.y*.14));
+    float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
     float crest=saturate(.55+a.x*.45+dot(slopes,float2(.18,-.12)));
     float3 l=safeNormalize(-lightDirection.xyz);
@@ -341,6 +352,25 @@ struct Scope {
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
             float controls[36]={float(GetTickCount64()%600000)*.001f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
+            // Prefer CelestialTracker's confirmed sun/moon direction (from
+            // the actual disc draw call, same source the sky rays/glow use)
+            // over WoW's own light-direction constant for the glint path -
+            // that constant can drift from the visible disc (the whole
+            // reason CelestialTracker exists), which showed up as the water
+            // "sun road" pointing at empty sky instead of the real sun.
+            // viewSpaceDirection already points TOWARD the source; the
+            // shader negates lightDirection to get that vector, so upload
+            // it pre-negated.
+            {
+                const renderer::CelestialBody& sunBody=renderer::CelestialTracker::Instance().Sun();
+                const renderer::CelestialBody& moonBody=renderer::CelestialTracker::Instance().Moon();
+                const renderer::CelestialBody* body=sunBody.visible?&sunBody:(moonBody.visible?&moonBody:nullptr);
+                if(body){
+                    controls[4]=-body->viewSpaceDirection.x;
+                    controls[5]=-body->viewSpaceDirection.y;
+                    controls[6]=-body->viewSpaceDirection.z;
+                }
+            }
             memcpy(controls+12,reflectionData,sizeof(reflectionData));
             controls[16]=reflectionsEnabled&&reflectionScene&&reflectionDepth?reflectionStrength:0;
             controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=reflectionScene&&reflectionDepth?1.f:0.f;
