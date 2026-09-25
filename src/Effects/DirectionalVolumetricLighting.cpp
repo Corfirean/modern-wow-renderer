@@ -404,6 +404,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   // temporal) reads this instead of the raw scene depth, so water's own
   // surface - not the seabed behind it - is what the atmosphere treats as
   // "where air stops".
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereBoundary);
   d->SetViewport(&full);d->SetRenderTarget(0,m_boundarySurface.Get());d->SetPixelShader(m_boundaryShader.Get());
   d->SetTexture(0,f.depthTexture);d->SetTexture(1,f.waterMaskTexture);d->SetTexture(2,f.waterDepthTexture);
   for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}

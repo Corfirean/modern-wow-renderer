@@ -222,6 +222,7 @@ namespace renderer
             ss << "[Perf] GPU timings (averaged over 300 frames, async queries):\n";
             ss << "  ShadowMap GPU                 = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::ShadowMap)) << " ms\n";
             ss << "  DirectionalVolumetric GPU     = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::DirectionalVolumetric)) << " ms\n";
+            ss << "  AtmosphereBoundary GPU        = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereBoundary)) << " ms\n";
             ss << "  AtmosphereIntegrate GPU       = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereIntegrate)) << " ms\n";
             ss << "  AtmosphereTemporal GPU        = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereTemporal)) << " ms\n";
             ss << "  AtmosphereUpsample GPU        = " << getGpuAvg(static_cast<size_t>(GpuPerfStage::AtmosphereUpsample)) << " ms\n";
