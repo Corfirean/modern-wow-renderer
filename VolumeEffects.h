@@ -53,7 +53,12 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
         float discFalloff=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*260.0);
         float discCutoff=1.0-smoothstep(0.10,0.16,sunDist);
         float sunMask=discFalloff*discCutoff;
-        float amount=openness*sunMask*sun.z*(.62+mode.y*.35);
+        // mode.y is now the SUN GLOW slider directly (0..3, 1.0 = the old
+        // "100%" default) - it used to only nudge this by +-0.35 around a
+        // fixed 0.62 floor, so dragging it to 0 barely dimmed the blob at
+        // all. It now scales the near-disc glare/blob linearly, with a
+        // small floor so it never hard-cuts to nothing.
+        float amount=openness*sunMask*sun.z*max(mode.y,.08);
         if(mode.x>6.5)return float4(amount,amount,amount,1);
         float3 color=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.35,.75);
         return float4(color*amount,1);

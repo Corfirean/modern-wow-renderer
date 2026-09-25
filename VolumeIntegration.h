@@ -874,7 +874,12 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
         check(d->SetPixelShaderConstantF(0, constants[0], 14));
-        float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f * sunGlareStrength, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
+        // y is the SUN GLOW slider as a clean 0..3 scale (100% -> 1.0). Used
+        // to be pre-multiplied by sunGlareStrength (0..~0.45 in practice),
+        // which squashed the whole slider into a barely-perceptible range -
+        // see the amount formula in volumePixelSource for the other half of
+        // that fix.
+        float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
 
