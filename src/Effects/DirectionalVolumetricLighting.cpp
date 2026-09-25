@@ -454,7 +454,19 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   DrawScreenQuad(d,m_fullWidth,m_fullHeight);
   d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);
  }
- if(m_groundHeightShader&&m_groundHeightSurface[0]&&m_groundHeightSurface[1]){
+ // Disabled for now: broke water effects entirely in live testing right
+ // after this was introduced (water rendered flat with no waves/
+ // reflection/refraction regardless of the WATER toggle state), most
+ // likely the per-frame GetRenderTargetData readback destabilizing the
+ // D3D9 device on this driver rather than an outright crash - the same
+ // class of "never-before-exercised D3D9 path" problem as the GPU-
+ // profiling timestamp queries earlier. Reverting to camera-relative
+ // fogBase/mistBase (groundRef falls back to f.cameraPosition.z below)
+ // until this can be re-attempted more carefully - e.g. throttled to
+ // every N frames, or read back with a method proven not to stall/upset
+ // this device.
+ constexpr bool kAllowGroundHeightTracking=false;
+ if(kAllowGroundHeightTracking&&m_groundHeightShader&&m_groundHeightSurface[0]&&m_groundHeightSurface[1]){
   // Read back the OTHER ring slot first - it was issued 1-2 frames ago,
   // so its GetRenderTargetData copy should be complete by now (no stall).
   uint32_t readIdx=1-m_groundHeightWriteIndex;
