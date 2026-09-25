@@ -130,37 +130,6 @@ ModernWoWRenderer/
 ├── .gitignore                 # Minimal git rules (no binaries or test dumps)
 └── README.md                  # Project documentation
 ```
-
----
-
-## Architectural Highlights & Performance
-
-- **Zero Per-Draw Allocations:** All shader bytecode queries (`GetFunction`) and heap allocations (`std::vector<BYTE>`) in hot draw loops have been replaced with a pointer-based `ShaderCache` utilizing FNV-1a hashing.
-- **Shader Compilation Re-use:** Shaders are compiled and instantiated once per device rather than recreated on each draw call.
-- **Centralized DrawCallClassifier:** Decouples geometry identification (M2 characters/creatures, WMO structures, Terrain chunks, Water, UI) into a cached, reusable classifier.
-- **Aggregated Diagnostics:** Telemetry counters (draw calls, classified vs. unknown, cache hits/misses, camera captures) are aggregated and logged periodically without causing I/O hitches.
-
----
-
-## Roadmap
-
-- [x] **Phase 1: Core Architecture & Diagnostics**
-  - Modular directory layout (`Core`, `D3D9`, `Scene`, `Diagnostics`, `Effects`)
-  - `MathTypes`, `FrameContext`, `ShaderCache`, `RendererDiagnostics`
-  - `DepthCapture` INTZ extraction & `CameraCapture` matrix extraction
-  - `DrawCallClassifier` with pipeline state caching
-- [x] **Phase 2a: Native Shadow Enhancement**
-  - Enhances WoW's own 4-cascade shadow maps (softness, strength) instead of
-    reconstructing shadows from screen-space depth or replaying light-space geometry
-  - Shadow distance/fade control not yet implemented
-- [ ] **Phase 2b: Ambient Occlusion**
-  - Ground Truth Ambient Occlusion (GTAO) / Horizon-Based Ambient Occlusion (HBAO)
-- [ ] **Phase 3: Screen-Space Reflections (SSR) & Water Overhaul**
-  - Hi-Z depth tracing / temporal reprojection for reflections
-  - Fresnel reflection curves and depth-based light extinction
-- [ ] **Phase 4: Post-Processing & Temporal Pipeline**
-  - Physically based Bloom (dual-filtering downsample/upsample)
-  - ACES / Reinhard Tonemapping & Color Grading
   - Temporal Anti-Aliasing (TAA) / Motion Vectors
 - [ ] **Phase 5: Modern Backend Abstraction**
   - Potential D3D11 / D3D12 render path via proxy translation
