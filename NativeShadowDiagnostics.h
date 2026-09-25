@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d3d9.h>
+#include <d3dcompiler.h>
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include "src/D3D9/ScopedRenderState.h"
 
 namespace nativeshadowdiag
 {
@@ -48,7 +50,15 @@ inline std::vector<TargetRecord> targets;
 inline std::unordered_set<uint64_t> loggedSignatures;
 inline uint32_t candidateDrawsThisFrame = 0;
 inline uint32_t rtReuseEventsThisFrame = 0;
-inline std::array<bool, 8> boundFormerRt{};
+inline std::array<bool, 16> boundFormerRt{};
+inline std::array<IDirect3DTexture9*, 16> previewTextureByStage{};
+inline std::unordered_set<uint64_t> dumpedVertexShaders;
+inline std::unordered_set<uint64_t> dumpedPixelShaders;
+inline std::wstring dumpDirectory;
+inline bool previewEnabled = false;
+inline bool previewKeyDown = false;
+inline IDirect3DDevice9* previewOwner = nullptr;
+inline IDirect3DPixelShader9* previewShader = nullptr;
 
 inline uint64_t Mix(uint64_t h, uint64_t v)
 {
@@ -121,6 +131,9 @@ inline void Configure(const std::wstring& basePath)
     summaryInterval = static_cast<uint32_t>(std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ShadowDiagnostics", L"SummaryIntervalFrames", 300, ini.c_str())), 60, 3600));
     maxUniqueCandidates = static_cast<uint32_t>(std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ShadowDiagnostics", L"MaxUniqueCandidates", 256, ini.c_str())), 32, 1024));
     logPath = basePath + L"NativeShadowDiagnostics.log";
+    dumpDirectory = basePath + L"NativeShadowShaders";
+    previewEnabled = GetPrivateProfileIntW(L"ShadowDiagnostics", L"PreviewEnabled", 1, ini.c_str()) != 0;
+    CreateDirectoryW(dumpDirectory.c_str(), nullptr);
     if (enabled)
     {
         std::ofstream out(logPath, std::ios::trunc);
@@ -144,6 +157,16 @@ inline void Reset()
     candidateDrawsThisFrame = 0;
     rtReuseEventsThisFrame = 0;
     boundFormerRt.fill(false);
+    for (auto*& texture : previewTextureByStage)
+    {
+        if (texture) texture->Release();
+        texture = nullptr;
+    }
+    if (previewShader) previewShader->Release();
+    previewShader = nullptr;
+    previewOwner = nullptr;
+    dumpedVertexShaders.clear();
+    dumpedPixelShaders.clear();
 }
 
 inline void OnSetRenderTarget(DWORD index, IDirect3DSurface9* surface)
@@ -204,6 +227,18 @@ inline void OnSetTexture(DWORD stage, IDirect3DBaseTexture9* texture)
 {
     if (!enabled) return;
     if (stage < boundFormerRt.size()) boundFormerRt[stage] = texture && FindTarget(texture);
+    if (stage < previewTextureByStage.size())
+    {
+        IDirect3DTexture9* next = nullptr;
+        if (texture && texture->GetType() == D3DRTYPE_TEXTURE)
+        {
+            TargetRecord* record = FindTarget(texture);
+            if (record && record->depthTarget) next = static_cast<IDirect3DTexture9*>(texture);
+        }
+        if (next) next->AddRef();
+        if (previewTextureByStage[stage]) previewTextureByStage[stage]->Release();
+        previewTextureByStage[stage] = next;
+    }
     if (!texture) return;
     TargetRecord* record = FindTarget(texture);
     if (!record || record->lastProducerFrame == 0 || record->reuseLogged) return;
@@ -240,6 +275,115 @@ inline void LogConstantsBlock(IDirect3DDevice9* d, std::ostringstream& s)
     }
 }
 
+template<typename Shader>
+inline void DumpShader(Shader* shader, uint64_t hash, const wchar_t* stage, std::unordered_set<uint64_t>& dumped)
+{
+    if (!shader || !hash || !dumped.insert(hash).second) return;
+    UINT size = 0;
+    if (FAILED(shader->GetFunction(nullptr, &size)) || !size || size > 65536) return;
+    std::vector<BYTE> bytes(size);
+    if (FAILED(shader->GetFunction(bytes.data(), &size))) return;
+
+    wchar_t name[96]{};
+    swprintf_s(name, L"\\%s_%016llx.bin", stage, static_cast<unsigned long long>(hash));
+    HANDLE file = CreateFileW((dumpDirectory + name).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        DWORD written = 0;
+        WriteFile(file, bytes.data(), size, &written, nullptr);
+        CloseHandle(file);
+    }
+
+    ID3DBlob* disassembly = nullptr;
+    if (SUCCEEDED(D3DDisassemble(bytes.data(), size, D3D_DISASM_ENABLE_INSTRUCTION_NUMBERING, nullptr, &disassembly)) && disassembly)
+    {
+        swprintf_s(name, L"\\%s_%016llx.asm", stage, static_cast<unsigned long long>(hash));
+        file = CreateFileW((dumpDirectory + name).c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            DWORD written = 0;
+            WriteFile(file, disassembly->GetBufferPointer(), static_cast<DWORD>(disassembly->GetBufferSize()), &written, nullptr);
+            CloseHandle(file);
+        }
+        disassembly->Release();
+    }
+}
+
+inline bool EnsurePreviewShader(IDirect3DDevice9* d)
+{
+    if (previewOwner == d && previewShader) return true;
+    if (previewShader) previewShader->Release();
+    previewShader = nullptr;
+    previewOwner = d;
+    static const char source[] =
+        "sampler2D shadowMap:register(s0); float4 tuning:register(c0);"
+        "float4 main(float2 uv:TEXCOORD0):COLOR0{"
+        "float depth=tex2D(shadowMap,uv).r;"
+        "float visible=pow(saturate((1-depth)*tuning.x),.35);"
+        "return float4(visible.xxx,1);}";
+    ID3DBlob* code = nullptr;
+    ID3DBlob* errors = nullptr;
+    const HRESULT hr = D3DCompile(source, sizeof(source) - 1, nullptr, nullptr, nullptr, "main", "ps_3_0",
+        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+    if (errors) errors->Release();
+    if (FAILED(hr) || !code) return false;
+    const HRESULT createHr = d->CreatePixelShader(static_cast<const DWORD*>(code->GetBufferPointer()), &previewShader);
+    code->Release();
+    return SUCCEEDED(createHr);
+}
+
+inline void DrawPreview(IDirect3DDevice9* d)
+{
+    if (!enabled || !previewEnabled || !d || !EnsurePreviewShader(d)) return;
+    int firstStage = -1;
+    for (int start : { 5, 4 })
+    {
+        bool complete = true;
+        for (int i = 0; i < 4; ++i) complete = complete && previewTextureByStage[start + i];
+        if (complete) { firstStage = start; break; }
+    }
+    if (firstStage < 0) return;
+
+    renderer::ScopedRenderState state(d);
+    D3DVIEWPORT9 viewport{};
+    if (FAILED(d->GetViewport(&viewport))) return;
+    struct Vertex { float x, y, z, rhw, u, v; };
+    const float tile = std::clamp(float(viewport.Height) * .16f, 128.f, 230.f);
+    const float gap = 5.f;
+    const float left = float(viewport.X + viewport.Width) - (tile + gap) * 4.f - gap;
+    const float top = float(viewport.Y) + gap;
+
+    d->SetVertexShader(nullptr);
+    d->SetPixelShader(previewShader);
+    d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    d->SetRenderState(D3DRS_ZENABLE, FALSE);
+    d->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+    d->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    d->SetRenderState(D3DRS_COLORWRITEENABLE, 0xf);
+    const float tuning[4] = { 64.f, 0, 0, 0 };
+    d->SetPixelShaderConstantF(0, tuning, 1);
+    d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    d->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    d->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    for (int i = 0; i < 4; ++i)
+    {
+        const float x0 = left + (tile + gap) * i;
+        const float x1 = x0 + tile;
+        const float y0 = top;
+        const float y1 = y0 + tile;
+        Vertex quad[] = {
+            { x0 - .5f, y0 - .5f, 0, 1, 0, 0 }, { x1 - .5f, y0 - .5f, 0, 1, 1, 0 },
+            { x0 - .5f, y1 - .5f, 0, 1, 0, 1 }, { x1 - .5f, y1 - .5f, 0, 1, 1, 1 }
+        };
+        d->SetTexture(0, previewTextureByStage[firstStage + i]);
+        d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(Vertex));
+    }
+    d->SetTexture(0, nullptr);
+}
+
 inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primitiveType, UINT primitiveCount,
                    uint64_t vsHash, uint64_t psHash, DWORD fvf, const void* vertexDecl,
                    bool alphaBlend, bool alphaTest, bool zEnable, bool zWrite)
@@ -265,7 +409,7 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
     D3DVIEWPORT9 viewport{};
     d->GetViewport(&viewport);
 
-    std::array<IDirect3DBaseTexture9*, 8> rawTextures{};
+    std::array<IDirect3DBaseTexture9*, 16> rawTextures{};
     for (DWORD stage = 0; stage < rawTextures.size(); ++stage)
     {
         d->GetTexture(stage, &rawTextures[stage]);
@@ -349,6 +493,34 @@ inline void OnDraw(IDirect3DDevice9* d, const char* api, D3DPRIMITIVETYPE primit
             else s << "  s" << stage << '=' << texture << " type=" << unsigned(type) << "\n";
         }
         LogConstantsBlock(d, s);
+        for (DWORD stage = 4; stage <= 8; ++stage)
+        {
+            if (!rawTextures[stage] || !FindTarget(rawTextures[stage]) || !FindTarget(rawTextures[stage])->depthTarget) continue;
+            DWORD minFilter = 0, magFilter = 0, mipFilter = 0, addressU = 0, addressV = 0, border = 0;
+            d->GetSamplerState(stage, D3DSAMP_MINFILTER, &minFilter);
+            d->GetSamplerState(stage, D3DSAMP_MAGFILTER, &magFilter);
+            d->GetSamplerState(stage, D3DSAMP_MIPFILTER, &mipFilter);
+            d->GetSamplerState(stage, D3DSAMP_ADDRESSU, &addressU);
+            d->GetSamplerState(stage, D3DSAMP_ADDRESSV, &addressV);
+            d->GetSamplerState(stage, D3DSAMP_BORDERCOLOR, &border);
+            s << "  sampler s" << stage << " min=" << minFilter << " mag=" << magFilter << " mip=" << mipFilter
+              << " addressU=" << addressU << " addressV=" << addressV << " border=0x" << std::hex << border << std::dec << "\n";
+        }
+        if (samplesPriorRt)
+        {
+            IDirect3DVertexShader9* vs = nullptr;
+            IDirect3DPixelShader9* ps = nullptr;
+            if (SUCCEEDED(d->GetVertexShader(&vs)) && vs)
+            {
+                DumpShader(vs, vsHash, L"vs", dumpedVertexShaders);
+                vs->Release();
+            }
+            if (SUCCEEDED(d->GetPixelShader(&ps)) && ps)
+            {
+                DumpShader(ps, psHash, L"ps", dumpedPixelShaders);
+                ps->Release();
+            }
+        }
         s << '\n';
         Append(s.str());
     }

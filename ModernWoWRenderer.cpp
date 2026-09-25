@@ -129,6 +129,7 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     }
     else {watereffect::DrawStatus(device);
     if(distancefog::enabled&&distancefog::showStatus)watereffect::DrawStatus(device,!distancefog::active?"HAZE OFF":distancefog::matches?"HAZE ON":"HAZE WAIT",1);}
+    nativeshadowdiag::DrawPreview(device);
     tuningoverlay::Draw(device);
     g_drawingOverlay=false;
     return g_originalEndScene(device);
@@ -205,7 +206,7 @@ SetPixelShaderFn originalSetPixelShader = nullptr;
 HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3DSurface9* surface)
 {
     const HRESULT hr = originalSetRenderTarget(d, index, surface);
-    if (SUCCEEDED(hr) && !volume::internal)
+    if (SUCCEEDED(hr) && !volume::internal && !g_drawingOverlay)
         nativeshadowdiag::OnSetRenderTarget(index, surface);
     return hr;
 }
@@ -213,7 +214,7 @@ HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3D
 HRESULT WINAPI HookedSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* texture)
 {
     const HRESULT hr = originalSetTexture(d, stage, texture);
-    if (SUCCEEDED(hr) && !volume::internal)
+    if (SUCCEEDED(hr) && !volume::internal && !g_drawingOverlay)
         nativeshadowdiag::OnSetTexture(stage, texture);
     return hr;
 }
