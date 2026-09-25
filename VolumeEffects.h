@@ -86,14 +86,22 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 
     float3 rayDir=normalize(viewEnd);
     float cosAngle=dot(rayDir,normalize(lightDirection.xyz));
-    float miePhase=pow(saturate(cosAngle*0.5+0.5),6.0);
-    float3 scattering=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.45,miePhase*.72);
-    float shaftAmount=sun.z*(.35+1.0*fogAmount)*(.40+.60*miePhase);
+    // Broad soft directional tint - whole-sky lean toward the light.
+    float softLobe=pow(saturate(cosAngle*0.5+0.5),4.0);
+    // Tight forward-scattering core (single-term Henyey-Greenstein,
+    // g=0.82) on top - this is what makes looking toward the sun/moon
+    // through haze actually glow, instead of just a flat sky-wide tint.
+    // Cheap: one pow + one divide, evaluated per pixel, no extra passes.
+    float g=0.82; float g2=g*g;
+    float hg=(1.0-g2)/pow(max(1.0+g2-2.0*g*cosAngle,1e-4),1.5)*0.0795774715;
+    float miePhase=saturate(softLobe*0.55+hg*2.2);
+    float3 scattering=lerp(fogColor.rgb,max(directColor.rgb,.15)*1.6,miePhase);
+    float shaftAmount=sun.z*(.35+1.0*fogAmount)*(.35+.85*miePhase);
     if(mode.x>4.5||mode.z>.5)return float4(fogAmount,fogAmount,fogAmount,1);
     if(mode.x>2.5)return float4(scattering,fogAmount*saturate(mode.y*1.5));
     float4 base=tex2D(scene,uv);
     float3 fogged=base.rgb*transmission+lerp(base.rgb,fogColor.rgb*.82,mode.y)*fogAmount;
-    return float4(fogged+scattering*shaftAmount*.4,base.a);
+    return float4(fogged+scattering*shaftAmount*.55,base.a);
 }
 )HLSL";
 
@@ -196,12 +204,15 @@ sampler2D sourceMask:register(s0);
 // xy=sun position, z=total ray reach, w=per-sample decay
 float4 radial:register(c0);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float2 stepUv=(radial.xy-uv)*(radial.z/16.0);
+    // 28 taps (was 16): smoother falloff/less banding on long reaches,
+    // still cheap at half-res.
+    static const int kSamples=28;
+    float2 stepUv=(radial.xy-uv)*(radial.z/float(kSamples));
     float illumination=1;
     float weightSum=0;
     float4 light=0;
     float2 q=uv;
-    [unroll] for(int i=0;i<16;++i) {
+    [unroll] for(int i=0;i<kSamples;++i) {
         q+=stepUv;
         float weight=illumination;
         light+=tex2D(sourceMask,q)*weight;
