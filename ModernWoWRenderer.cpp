@@ -27,6 +27,7 @@
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
 #include "src/Scene/DrawCallClassifier.h"
+#include "NativeShadowDiagnostics.h"
 
 namespace
 {
@@ -155,6 +156,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     distancefog::Present();
     waterdiag::Present(d);
     celestialdiag::Present(d);
+    nativeshadowdiag::OnPresent(d);
     renderer::RendererDiagnostics::Instance().OnFrameEnd();
     return originalPresent(d,a,b,w,r);
 }
@@ -164,6 +166,7 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     watereffect::Reset(d);
     waterdiag::Reset(d);
     celestialdiag::Reset(d);
+    nativeshadowdiag::Reset();
     renderer::ShaderCache::Instance().Clear();
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DepthCapture::Instance().Reset(d);
@@ -184,16 +187,36 @@ HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD
     volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
 }
 using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
+using SetRenderTargetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
+using SetTextureFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DBaseTexture9*);
 using SetVertexDeclarationFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexDeclaration9*);
 using SetFVFFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD);
 using SetVertexShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DVertexShader9*);
 using SetPixelShaderFn = HRESULT(WINAPI*)(IDirect3DDevice9*, IDirect3DPixelShader9*);
 
 SetRenderStateFn originalSetRenderState = nullptr;
+SetRenderTargetFn originalSetRenderTarget = nullptr;
+SetTextureFn originalSetTexture = nullptr;
 SetVertexDeclarationFn originalSetVertexDeclaration = nullptr;
 SetFVFFn originalSetFVF = nullptr;
 SetVertexShaderFn originalSetVertexShader = nullptr;
 SetPixelShaderFn originalSetPixelShader = nullptr;
+
+HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3DSurface9* surface)
+{
+    const HRESULT hr = originalSetRenderTarget(d, index, surface);
+    if (SUCCEEDED(hr) && !volume::internal)
+        nativeshadowdiag::OnSetRenderTarget(index, surface);
+    return hr;
+}
+
+HRESULT WINAPI HookedSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* texture)
+{
+    const HRESULT hr = originalSetTexture(d, stage, texture);
+    if (SUCCEEDED(hr) && !volume::internal)
+        nativeshadowdiag::OnSetTexture(stage, texture);
+    return hr;
+}
 
 HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9* vs)
 {
@@ -264,6 +287,7 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
     if(volume::internal)return originalDraw(d,t,start,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
@@ -286,6 +310,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
@@ -308,6 +333,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
     if(volume::internal)return originalDrawUP(d,t,n,v,stride);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
@@ -330,6 +356,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
     if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
@@ -357,12 +384,14 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
     if(!VirtualProtect(&table[16],95*sizeof(void*),PAGE_READWRITE,&oldProtect))return;
 
     InterlockedExchangePointer(&table[42],reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[37],reinterpret_cast<void*>(HookedSetRenderTarget));
     InterlockedExchangePointer(&table[57],reinterpret_cast<void*>(HookedSetRenderState));
+    InterlockedExchangePointer(&table[65],reinterpret_cast<void*>(HookedSetTexture));
     InterlockedExchangePointer(&table[87],reinterpret_cast<void*>(HookedSetVertexDeclaration));
     InterlockedExchangePointer(&table[89],reinterpret_cast<void*>(HookedSetFVF));
     InterlockedExchangePointer(&table[92],reinterpret_cast<void*>(HookedSetVertexShader));
     InterlockedExchangePointer(&table[107],reinterpret_cast<void*>(HookedSetPixelShader));
-    if(waterdiag::enabled||waterhighlight::enabled||watereffect::enabled||distancefog::enabled||volume::enabled||unified){
+    if(waterdiag::enabled||waterhighlight::enabled||watereffect::enabled||distancefog::enabled||volume::enabled||nativeshadowdiag::enabled||unified){
         InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
         InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
         InterlockedExchangePointer(&table[81],reinterpret_cast<void*>(HookedDraw));
@@ -398,7 +427,9 @@ void HookDevice(IDirect3DDevice9* device)
     g_originalEndScene = reinterpret_cast<EndSceneFn>(table[42]);
     originalReset=reinterpret_cast<ResetFn>(table[16]);
     originalPresent=reinterpret_cast<PresentFn>(table[17]);
+    originalSetRenderTarget=reinterpret_cast<SetRenderTargetFn>(table[37]);
     originalSetRenderState=reinterpret_cast<SetRenderStateFn>(table[57]);
+    originalSetTexture=reinterpret_cast<SetTextureFn>(table[65]);
     originalDraw=reinterpret_cast<DrawFn>(table[81]);
     originalDrawIndexed=reinterpret_cast<DrawIndexedFn>(table[82]);
     originalDrawUP=reinterpret_cast<DrawUPFn>(table[83]);
@@ -409,13 +440,15 @@ void HookDevice(IDirect3DDevice9* device)
     originalSetPixelShader=reinterpret_cast<SetPixelShaderFn>(table[107]);
 
     InterlockedExchangePointer(&table[42], reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[37], reinterpret_cast<void*>(HookedSetRenderTarget));
     InterlockedExchangePointer(&table[57], reinterpret_cast<void*>(HookedSetRenderState));
+    InterlockedExchangePointer(&table[65], reinterpret_cast<void*>(HookedSetTexture));
     InterlockedExchangePointer(&table[87], reinterpret_cast<void*>(HookedSetVertexDeclaration));
     InterlockedExchangePointer(&table[89], reinterpret_cast<void*>(HookedSetFVF));
     InterlockedExchangePointer(&table[92], reinterpret_cast<void*>(HookedSetVertexShader));
     InterlockedExchangePointer(&table[107], reinterpret_cast<void*>(HookedSetPixelShader));
 
-    if(waterdiag::enabled || waterhighlight::enabled || watereffect::enabled || distancefog::enabled || volume::enabled || unified) {
+    if(waterdiag::enabled || waterhighlight::enabled || watereffect::enabled || distancefog::enabled || volume::enabled || nativeshadowdiag::enabled || unified) {
         InterlockedExchangePointer(&table[16],reinterpret_cast<void*>(HookedReset));
         InterlockedExchangePointer(&table[17],reinterpret_cast<void*>(HookedPresent));
         InterlockedExchangePointer(&table[81],reinterpret_cast<void*>(HookedDraw));
@@ -506,6 +539,7 @@ void Initialize()
     volume::Configure(g_basePath);
     waterreflection::Configure(g_basePath);
     tuningoverlay::Configure(g_basePath);
+    nativeshadowdiag::Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
     unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
     if(unified){watereffect::hotkey=false;distancefog::hotkey=false;g_settings.enabled=false;
