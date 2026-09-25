@@ -318,8 +318,11 @@ struct Scope {
         // Fast early exit: only water shaders need the rest of this expensive setup
         uint64_t psHash = renderer::g_trackedState.psHash;
         uint64_t vsHash = renderer::g_trackedState.vsHash;
+        // 0x48a82796bd612aeb: extra near-camera water vertex shader (same
+        // pixel shader, same 8x64/512x512 texture layout below - confirmed
+        // via WaterDiag capture, it was just missing from this list).
         if ((psHash!=0x17f042a7906ca126ull && psHash!=0x7d4f078fa1876a09ull) ||
-            (vsHash!=0x206d861fd0a721ddull && vsHash!=0xfdd9528ed3ac30eaull))
+            (vsHash!=0x206d861fd0a721ddull && vsHash!=0xfdd9528ed3ac30eaull && vsHash!=0x48a82796bd612aebull))
             return;
         try {
             // Check texture layout: slot 0 is 8x64 ripple LUT, slot 1 is 512x512 wave normal

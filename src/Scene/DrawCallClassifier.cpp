@@ -65,9 +65,13 @@ namespace renderer
         }
 
         // 2. Water Check
+        // 0x48a82796bd612aeb: extra vertex shader the client swaps to for
+        // water tiles very close to the camera, same pixel shader as usual -
+        // without it those tiles fell through unclassified (WaterDiag capture).
         bool waterShaderPair =
             (ctx.psHash == 0x17f042a7906ca126ull || ctx.psHash == 0x7d4f078fa1876a09ull) &&
-            (ctx.vsHash == 0x206d861fd0a721ddull || ctx.vsHash == 0xfdd9528ed3ac30eaull);
+            (ctx.vsHash == 0x206d861fd0a721ddull || ctx.vsHash == 0xfdd9528ed3ac30eaull ||
+             ctx.vsHash == 0x48a82796bd612aebull);
 
         if (waterShaderPair)
         {
