@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -59,6 +60,18 @@ inline bool previewEnabled = false;
 inline bool previewKeyDown = false;
 inline IDirect3DDevice9* previewOwner = nullptr;
 inline IDirect3DPixelShader9* previewShader = nullptr;
+inline bool enhancementEnabled = true;
+inline float softnessScale = 1.45f;
+inline std::wstring settingsPath;
+
+inline void ReloadEnhancement()
+{
+    if (settingsPath.empty()) return;
+    enhancementEnabled = GetPrivateProfileIntW(L"NativeShadows", L"Enabled", 1, settingsPath.c_str()) != 0;
+    const int percent = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+        L"NativeShadows", L"SoftnessPercent", 145, settingsPath.c_str())), 50, 220);
+    softnessScale = static_cast<float>(percent) * .01f;
+}
 
 inline uint64_t Mix(uint64_t h, uint64_t v)
 {
@@ -126,6 +139,8 @@ inline TargetRecord* FindTarget(const void* texture)
 inline void Configure(const std::wstring& basePath)
 {
     const std::wstring ini = basePath + L"GraphicsEffects.ini";
+    settingsPath = ini;
+    ReloadEnhancement();
     enabled = GetPrivateProfileIntW(L"ShadowDiagnostics", L"Enabled", 1, ini.c_str()) != 0;
     logConstants = GetPrivateProfileIntW(L"ShadowDiagnostics", L"LogConstants", 1, ini.c_str()) != 0;
     summaryInterval = static_cast<uint32_t>(std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ShadowDiagnostics", L"SummaryIntervalFrames", 300, ini.c_str())), 60, 3600));
@@ -171,7 +186,7 @@ inline void Reset()
 
 inline void OnSetRenderTarget(DWORD index, IDirect3DSurface9* surface)
 {
-    if (!enabled || index != 0 || !surface) return;
+    if ((!enabled && !enhancementEnabled) || index != 0 || !surface) return;
     D3DSURFACE_DESC desc{};
     if (FAILED(surface->GetDesc(&desc))) return;
     currentRtDesc = desc;
@@ -190,17 +205,20 @@ inline void OnSetRenderTarget(DWORD index, IDirect3DSurface9* surface)
     {
         targets.push_back({ currentRtTexture, desc.Width, desc.Height, desc.Format, 0, 0, 0, 0, false, false });
         record = &targets.back();
-        std::ostringstream s;
-        s << "[RT_DISCOVER] frame=" << frame << " texture=" << currentRtTexture
-          << " size=" << desc.Width << 'x' << desc.Height
-          << " format=" << FormatName(desc.Format) << '(' << unsigned(desc.Format) << ")\n";
-        Append(s.str());
+        if (enabled)
+        {
+            std::ostringstream s;
+            s << "[RT_DISCOVER] frame=" << frame << " texture=" << currentRtTexture
+              << " size=" << desc.Width << 'x' << desc.Height
+              << " format=" << FormatName(desc.Format) << '(' << unsigned(desc.Format) << ")\n";
+            Append(s.str());
+        }
     }
 }
 
 inline void OnSetDepth(IDirect3DSurface9* surface)
 {
-    if (!enabled) return;
+    if (!enabled && !enhancementEnabled) return;
     currentDsTexture = nullptr;
     currentDsValid = false;
     if (!surface) return;
@@ -215,17 +233,20 @@ inline void OnSetDepth(IDirect3DSurface9* surface)
     if (!record)
     {
         targets.push_back({ currentDsTexture, desc.Width, desc.Height, desc.Format, 0, 0, 0, 0, false, true });
-        std::ostringstream s;
-        s << "[DS_DISCOVER] frame=" << frame << " texture=" << currentDsTexture
-          << " size=" << desc.Width << 'x' << desc.Height
-          << " format=" << FormatName(desc.Format) << '(' << unsigned(desc.Format) << ")\n";
-        Append(s.str());
+        if (enabled)
+        {
+            std::ostringstream s;
+            s << "[DS_DISCOVER] frame=" << frame << " texture=" << currentDsTexture
+              << " size=" << desc.Width << 'x' << desc.Height
+              << " format=" << FormatName(desc.Format) << '(' << unsigned(desc.Format) << ")\n";
+            Append(s.str());
+        }
     }
 }
 
 inline void OnSetTexture(DWORD stage, IDirect3DBaseTexture9* texture)
 {
-    if (!enabled) return;
+    if (!enabled && !enhancementEnabled) return;
     if (stage < boundFormerRt.size()) boundFormerRt[stage] = texture && FindTarget(texture);
     if (stage < previewTextureByStage.size())
     {
@@ -241,7 +262,7 @@ inline void OnSetTexture(DWORD stage, IDirect3DBaseTexture9* texture)
     }
     if (!texture) return;
     TargetRecord* record = FindTarget(texture);
-    if (!record || record->lastProducerFrame == 0 || record->reuseLogged) return;
+    if (!enabled || !record || record->lastProducerFrame == 0 || record->reuseLogged) return;
     record->reuseLogged = true;
     ++rtReuseEventsThisFrame;
     std::ostringstream s;
@@ -256,6 +277,160 @@ inline void OnSetTexture(DWORD stage, IDirect3DBaseTexture9* texture)
       << " producer_ps=0x" << record->lastProducerPs << std::dec << "\n";
     Append(s.str());
 }
+
+// Register layout is a property of the SHADER (its own constant layout),
+// not of which texture stage the cascades happened to be bound to this
+// particular draw - the original stage-keyed lists rejected known-good
+// hashes whenever they showed up on the "other" stage (confirmed live:
+// 0xac726e53bca0ac1a, originally only accepted at stage 5, was observed
+// bound at stage 4 too and wrongly rejected there). Keyed by hash instead.
+inline bool FindReceiverRegisterLayout(uint64_t hash, UINT& startRegister, UINT& registerCount, bool& oddRegistersOnly)
+{
+    // Verified from Round 6 runtime captures and disassembly. These are WoW's
+    // native world/WMO/M2 receiver variants, not renderer replacement shaders.
+    static constexpr uint64_t kFamilyA[] = { // register layout: c5, count 7 (only odd registers are real UV offsets)
+        0x06b49731d6b3d33eull, 0x0a959b9587e8d509ull, 0x2d398d9d47f90d9dull,
+        0x42c3a115d145164aull, 0x6ef54f064e5141ddull, 0x827c05c3635b689full,
+        0x92a403ad7278dd4full, 0xb52eba6fbc7f34f2ull, 0xc4b68e0f9cd2c852ull,
+        0xca8fa34d6b69a7baull, 0xcc75b5e865b2f869ull, 0xdd40e9d5fc1ef426ull,
+        0xf71ca77414ce780eull
+    };
+    static constexpr uint64_t kFamilyB[] = { // register layout: c3, count 8
+        0x08b17d1abaad8eceull, 0x449b66c5fb94fedeull, 0x634793193e26059dull,
+        0x6e6f053c4b910cf4ull, 0xac726e53bca0ac1aull
+    };
+    if (std::find(std::begin(kFamilyA), std::end(kFamilyA), hash) != std::end(kFamilyA))
+    {
+        startRegister = 5u; registerCount = 7u; oddRegistersOnly = true; return true;
+    }
+    if (std::find(std::begin(kFamilyB), std::end(kFamilyB), hash) != std::end(kFamilyB))
+    {
+        startRegister = 3u; registerCount = 8u; oddRegistersOnly = false; return true;
+    }
+    // Newly observed receiver variants (live captures, e.g. tree/building
+    // material families not covered by the original two captures) - logged
+    // as candidates (see the "not in the receiver whitelist" branch below)
+    // but deliberately NOT enhanced yet. Their register layout hasn't been
+    // disassembly-verified, and guessing a range risks scaling something
+    // that isn't a UV offset in a shader family we haven't inspected.
+    return false;
+}
+
+inline bool HasFourNativeCascades(int firstStage)
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        IDirect3DTexture9* texture = previewTextureByStage[firstStage + i];
+        TargetRecord* target = FindTarget(texture);
+        if (!texture || !target || !target->depthTarget || target->width != 2048 || target->height != 2048 ||
+            target->format != D3DFMT_D24X8)
+            return false;
+    }
+    return true;
+}
+
+class SoftnessScope
+{
+public:
+    SoftnessScope(IDirect3DDevice9* d, uint64_t psHash, IDirect3DPixelShader9* trackedShader) : device(d)
+    {
+        if (!enhancementEnabled || !device || std::abs(softnessScale - 1.f) < .001f || currentRtTexture)
+            return;
+
+        IDirect3DPixelShader9* actualShader = nullptr;
+        if (FAILED(device->GetPixelShader(&actualShader)) || actualShader != trackedShader)
+        {
+            if (actualShader) actualShader->Release();
+            return;
+        }
+        if (actualShader) actualShader->Release();
+
+        firstStage = HasFourNativeCascades(4) ? 4 : (HasFourNativeCascades(5) ? 5 : -1);
+        static bool loggedNoCascades = false;
+        if (firstStage < 0)
+        {
+            if (!loggedNoCascades) { loggedNoCascades = true; Append("[SOFTNESS] no 4-cascade texture set bound on this draw (psHash checked against stage 4 and 5)\n"); }
+            return;
+        }
+        bool oddRegistersOnly = false;
+        if (!FindReceiverRegisterLayout(psHash, startRegister, registerCount, oddRegistersOnly))
+        {
+            static std::unordered_set<uint64_t> loggedUnmatched;
+            if (loggedUnmatched.insert(psHash).second)
+            {
+                std::ostringstream s;
+                s << "[SOFTNESS] cascades bound at stage " << firstStage << " but psHash=0x" << std::hex << psHash << std::dec << " is not in the receiver whitelist\n";
+                Append(s.str());
+            }
+            return;
+        }
+
+        DWORD colorWrite = 0;
+        if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
+
+        if (FAILED(device->GetPixelShaderConstantF(startRegister, original[0], registerCount))) return;
+        std::copy(&original[0][0], &original[0][0] + registerCount * 4, &adjusted[0][0]);
+
+        bool changed = false;
+        for (UINT r = 0; r < registerCount; ++r)
+        {
+            const UINT absoluteRegister = startRegister + r;
+            const bool usedOffset = oddRegistersOnly ? (absoluteRegister % 2 == 1) : true;
+            const float x = adjusted[r][0], y = adjusted[r][1];
+            const bool looksLikeUvOffset = usedOffset && std::abs(x) <= .002f && std::abs(y) <= .002f &&
+                (std::abs(x) + std::abs(y)) > .00001f && std::abs(adjusted[r][2]) < .00001f &&
+                std::abs(adjusted[r][3]) < .00001f;
+            if (!looksLikeUvOffset) continue;
+            adjusted[r][0] *= softnessScale;
+            adjusted[r][1] *= softnessScale;
+            changed = true;
+        }
+        static bool loggedNoOffsetFound = false;
+        if (!changed)
+        {
+            if (!loggedNoOffsetFound)
+            {
+                loggedNoOffsetFound = true;
+                std::ostringstream s;
+                s << "[SOFTNESS] matched receiver psHash=0x" << std::hex << psHash << std::dec
+                  << " at stage " << firstStage << " but none of the " << registerCount
+                  << " registers from c" << startRegister << " looked like a UV offset - nothing scaled\n";
+                Append(s.str());
+            }
+            return;
+        }
+        if (SUCCEEDED(device->SetPixelShaderConstantF(startRegister, adjusted[0], registerCount)))
+        {
+            active = true;
+            static bool loggedActive = false;
+            if (!loggedActive)
+            {
+                loggedActive = true;
+                std::ostringstream s;
+                s << "[SOFTNESS] ACTIVE: scaled registers c" << startRegister << ".." << (startRegister + registerCount - 1)
+                  << " by " << softnessScale << "x for psHash=0x" << std::hex << psHash << std::dec << " at stage " << firstStage << "\n";
+                Append(s.str());
+            }
+        }
+    }
+
+    ~SoftnessScope()
+    {
+        if (active && device) device->SetPixelShaderConstantF(startRegister, original[0], registerCount);
+    }
+
+    SoftnessScope(const SoftnessScope&) = delete;
+    SoftnessScope& operator=(const SoftnessScope&) = delete;
+
+private:
+    IDirect3DDevice9* device = nullptr;
+    int firstStage = -1;
+    UINT startRegister = 0;
+    UINT registerCount = 0;
+    bool active = false;
+    float original[8][4]{};
+    float adjusted[8][4]{};
+};
 
 inline void LogConstantsBlock(IDirect3DDevice9* d, std::ostringstream& s)
 {

@@ -138,7 +138,7 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
     waterreflection::Present();
     volume::Present(d);
-    if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);Log("F7 overlay changed GraphicsEffects.ini");}
+    if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();Log("F7 overlay changed GraphicsEffects.ini");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
@@ -149,7 +149,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);Log("F12 reloaded GraphicsEffects.ini");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();Log("F12 reloaded GraphicsEffects.ini");}
         tuningKeyDown=down;
     }
     waterhighlight::Present();
@@ -303,6 +303,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     HRESULT hr=originalDraw(d,t,start,n);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
@@ -326,6 +327,7 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     HRESULT hr=originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
@@ -349,6 +351,7 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     HRESULT hr=originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
@@ -372,6 +375,7 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
+    nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
     HRESULT hr=originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
