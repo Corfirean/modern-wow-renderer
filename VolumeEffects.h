@@ -23,6 +23,8 @@ float4 lightDirection:register(c10);
 float4 directColor:register(c11);
 // xy=1/render size,z=softness in pixels,w=radial falloff
 float4 rayTuning:register(c12);
+// Second, independent height-fog layer (ground mist): x=height,y=falloff,z=density
+float4 groundMist:register(c13);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float raw=tex2D(depthMap,uv).r;
     float z=raw>=.9999 ? medium.w : projection.y/(raw/max(sun.w,.001)-projection.x);
@@ -30,18 +32,33 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     if(mode.x<.5)return float4(z/medium.w,z/medium.w,z/medium.w,1);
     if(mode.x>5.5) {
         float clearThreshold=lerp(.9995,.955,step(sun.w,.99));
+        // Depth-based occlusion ONLY - is this pixel actually open sky.
+        // Geometry/cloud can attenuate this, never emit: brightness never
+        // enters the emission term below.
         float openness=smoothstep(clearThreshold,1,raw);
-        float3 skyColor=tex2D(scene,uv).rgb;
-        float skyLuminance=dot(skyColor,float3(.2126,.7152,.0722));
-        float sourceThreshold=clamp(mode.w, 0.40, 0.85);
-        float sunDist=length(uv-sun.xy);
-        float sunMask=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*18.0);
-        float visibleSun=saturate((skyLuminance-sourceThreshold)/max(1-sourceThreshold,.01));
-        // A soft sky gate around the exact projected sun remains present when
-        // the disc itself is hidden by a tower. Geometry cuts this source mask,
-        // and the radial pass turns that cut into crepuscular rays.
-        float skyGate=saturate((skyLuminance-sourceThreshold*.48)/max(1-sourceThreshold*.48,.01));
-        float amount=openness*sunMask*(.38*skyGate+1.25*visibleSun)*sun.z*(.62+mode.y*.35);
+        // Aspect-ratio-correct distance to the real, CelestialTracker-
+        // confirmed disc position (sun.xy). Raw UV-space distance is
+        // squashed on non-square screens - a 0.1 horizontal delta covers
+        // far more pixels than 0.1 vertical at 16:9 - which skewed the mask
+        // into an ellipse. Express both axes in the same physical unit
+        // (screen-height pixels) before measuring.
+        float aspect=rayTuning.y>0.0 ? rayTuning.y/max(rayTuning.x,1e-6) : 1.0;
+        float2 delta=float2((uv.x-sun.x)*aspect,uv.y-sun.y);
+        float sunDist=length(delta);
+        // Pure position mask, tight and hard-clipped around the real disc.
+        // A bright cloud anywhere else on screen contributes nothing here -
+        // it can only show up via `openness` failing to be 1 (occlusion),
+        // never by adding to `sunMask`. This is the fix for "bright cloud
+        // becomes a second sun".
+        float discFalloff=(sun.x<-.5) ? 0.0 : exp(-sunDist*sunDist*260.0);
+        float discCutoff=1.0-smoothstep(0.10,0.16,sunDist);
+        float sunMask=discFalloff*discCutoff;
+        // mode.y is now the SUN GLOW slider directly (0..3, 1.0 = the old
+        // "100%" default) - it used to only nudge this by +-0.35 around a
+        // fixed 0.62 floor, so dragging it to 0 barely dimmed the blob at
+        // all. It now scales the near-disc glare/blob linearly, with a
+        // small floor so it never hard-cuts to nothing.
+        float amount=openness*sunMask*sun.z*max(mode.y,.08);
         if(mode.x>6.5)return float4(amount,amount,amount,1);
         float3 color=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.35,.75);
         return float4(color*amount,1);
@@ -56,9 +73,26 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float dz=delta.z;
     float u=clamp(medium.y*dz,-12.0,12.0);
     float factor=(abs(u)<0.02) ? (1.0-0.5*u+(1.0/6.0)*u*u) : ((1.0-exp(-u))/u);
-    float eCam=exp(-clamp(hCam*medium.y,-8.0,8.0));
+    // Clamp was +-8 (exp(8)~=2981x): a camera sitting even moderately below
+    // BaseHeight - the normal case, since BaseHeight is an absolute world Z
+    // and most zones don't put ground at Z=0 to match a default/tuned
+    // value - blew this multiplier up catastrophically, whiting out the
+    // whole scene instead of giving a graceful "thicker in the valley"
+    // falloff. +-3 (exp(3)~=20x) still gives real height response without
+    // the blowout.
+    float eCam=exp(-clamp(hCam*medium.y,-3.0,3.0));
     float optDepth=medium.z*rayLen*eCam*factor;
     optDepth=max(optDepth,0.0);
+
+    // Second layer: low, dense ground mist. Same analytic integral, stacked
+    // on top by summing optical depth (the physically correct way to
+    // combine two independent scattering media along one ray) rather than
+    // replacing the broader haze above.
+    float hCamMist=origin.z-groundMist.x;
+    float uMist=clamp(groundMist.y*dz,-12.0,12.0);
+    float factorMist=(abs(uMist)<0.02) ? (1.0-0.5*uMist+(1.0/6.0)*uMist*uMist) : ((1.0-exp(-uMist))/uMist);
+    float eCamMist=exp(-clamp(hCamMist*groundMist.y,-3.0,3.0));
+    optDepth+=max(groundMist.z*rayLen*eCamMist*factorMist,0.0);
 
     // Atmospheric rolling noise modulation
     float2 wind=float2(detail.x*.0021,-detail.x*.0013);
@@ -68,7 +102,11 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     optDepth*=lerp(.75,1.25,cloud*detail.z);
 
     float transmission=exp(-clamp(optDepth,0.0,12.0));
-    float isSky=step(.9995,raw);
+    // Was a hard step() at the sky/geometry depth threshold - any camera
+    // angle that put the horizon near mid-screen showed this as a visible
+    // seam/band. smoothstep spreads the transition over a few depth units
+    // instead of one hard edge.
+    float isSky=smoothstep(.9985,.9998,raw);
     float distFog=1.0-exp(-min(z,medium.w)*medium.z*0.06);
     float fogAmount=max(1.0-transmission,distFog*0.35);
     // Smooth transition into sky distance fog rather than a hard cut
@@ -76,14 +114,22 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 
     float3 rayDir=normalize(viewEnd);
     float cosAngle=dot(rayDir,normalize(lightDirection.xyz));
-    float miePhase=pow(saturate(cosAngle*0.5+0.5),6.0);
-    float3 scattering=lerp(fogColor.rgb,max(directColor.rgb,.1)*1.45,miePhase*.72);
-    float shaftAmount=sun.z*(.35+1.0*fogAmount)*(.40+.60*miePhase);
+    // Broad soft directional tint - whole-sky lean toward the light.
+    float softLobe=pow(saturate(cosAngle*0.5+0.5),4.0);
+    // Tight forward-scattering core (single-term Henyey-Greenstein,
+    // g=0.82) on top - this is what makes looking toward the sun/moon
+    // through haze actually glow, instead of just a flat sky-wide tint.
+    // Cheap: one pow + one divide, evaluated per pixel, no extra passes.
+    float g=0.82; float g2=g*g;
+    float hg=(1.0-g2)/pow(max(1.0+g2-2.0*g*cosAngle,1e-4),1.5)*0.0795774715;
+    float miePhase=saturate(softLobe*0.55+hg*2.2);
+    float3 scattering=lerp(fogColor.rgb,max(directColor.rgb,.15)*1.6,miePhase);
+    float shaftAmount=sun.z*(.35+1.0*fogAmount)*(.35+.85*miePhase);
     if(mode.x>4.5||mode.z>.5)return float4(fogAmount,fogAmount,fogAmount,1);
     if(mode.x>2.5)return float4(scattering,fogAmount*saturate(mode.y*1.5));
     float4 base=tex2D(scene,uv);
     float3 fogged=base.rgb*transmission+lerp(base.rgb,fogColor.rgb*.82,mode.y)*fogAmount;
-    return float4(fogged+scattering*shaftAmount*.4,base.a);
+    return float4(fogged+scattering*shaftAmount*.55,base.a);
 }
 )HLSL";
 
@@ -107,24 +153,85 @@ sampler2D image:register(s0);
 float4 main(float2 uv:TEXCOORD0):COLOR0 { return tex2D(image,uv); }
 )HLSL";
 
-// Reprojects no geometry, so history is aggressively clipped to the current
-// four-neighbour envelope. This keeps shafts calm under foliage without the
-// long camera-motion trails of an unconstrained temporal average.
+// Real motion-compensated reprojection: reconstructs this frame's world
+// position from full-res depth, transforms it by LAST frame's view matrix
+// (+ this frame's projection, assumed FOV-stable across one frame) to find
+// where that same world point sat on screen last frame, and samples
+// history there instead of at the naive same UV. Previously this shader
+// just clamped history sampled at the current UV to the current frame's
+// local neighborhood - correct for a static camera, but under camera
+// motion that UV corresponds to a DIFFERENT world point each frame, so the
+// old approach was really just heavy smoothing, not reprojection (it
+// worked only because the neighborhood clamp kept it from diverging
+// badly). Falls back to that same-UV clamp for sky pixels (depth==far
+// plane), where a stable reprojection target doesn't exist.
 inline const char* volumeTemporalPixelSource=R"HLSL(
 sampler2D currentFrame:register(s0);
 sampler2D historyFrame:register(s1);
-// xy=one texel, z=history weight, w=history valid
+sampler2D depthMap:register(s2);
+// xy=one low-res texel, z=history weight, w=history valid
 float4 temporal:register(c0);
-float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float4 c=tex2D(currentFrame,uv);
-    if(temporal.w<.5)return c;
+// x=P22,y=P32,z=P00,w=P11 (this frame's projection)
+float4 projUnpack:register(c1);
+float4 invView0:register(c2);
+float4 invView1:register(c3);
+float4 invView2:register(c4);
+// xyz=camera world position (this frame)
+float4 cameraPos:register(c5);
+// LAST frame's raw forward (world->view) matrix rows (row-vector
+// convention: pos_view = pos_world * M, row3 = translation)
+float4 prevView0:register(c6);
+float4 prevView1:register(c7);
+float4 prevView2:register(c8);
+float4 prevView3:register(c9);
+
+float4 clampedHistory(float2 uv,float4 c) {
     float4 a=tex2D(currentFrame,uv+float2(temporal.x,0));
     float4 b=tex2D(currentFrame,uv-float2(temporal.x,0));
     float4 d=tex2D(currentFrame,uv+float2(0,temporal.y));
     float4 e=tex2D(currentFrame,uv-float2(0,temporal.y));
     float4 lo=min(c,min(min(a,b),min(d,e)));
     float4 hi=max(c,max(max(a,b),max(d,e)));
-    float4 h=clamp(tex2D(historyFrame,uv),lo,hi);
+    return clamp(tex2D(historyFrame,uv),lo,hi);
+}
+
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float4 c=tex2D(currentFrame,uv);
+    if(temporal.w<.5)return c;
+
+    float raw=tex2D(depthMap,uv).r;
+    if(raw>=.9999) {
+        // Sky: no stable world point to reproject - same-UV clamp only.
+        return lerp(c,clampedHistory(uv,c),temporal.z);
+    }
+
+    float z=projUnpack.y/(raw-projUnpack.x);
+    float3 viewPos=float3((uv.x*2-1)/projUnpack.z,(1-uv.y*2)/projUnpack.w,1)*z;
+    float3 worldPos=cameraPos.xyz
+        +viewPos.x*invView0.xyz+viewPos.y*invView1.xyz+viewPos.z*invView2.xyz;
+
+    float3 prevViewPos=float3(
+        dot(worldPos,prevView0.xyz)+prevView3.x,
+        dot(worldPos,prevView1.xyz)+prevView3.y,
+        dot(worldPos,prevView2.xyz)+prevView3.z);
+
+    if(prevViewPos.z<=0.05) return lerp(c,clampedHistory(uv,c),temporal.z);
+
+    float2 prevUv=float2(
+        0.5+0.5*(prevViewPos.x/prevViewPos.z)*projUnpack.z,
+        0.5-0.5*(prevViewPos.y/prevViewPos.z)*projUnpack.w);
+
+    // Out of bounds (off-screen last frame, camera cut/teleport, or no
+    // valid previous frame at all): no reprojection target - same-UV clamp.
+    if(prevView0.w<0.5||prevUv.x<0.0||prevUv.x>1.0||prevUv.y<0.0||prevUv.y>1.0)
+        return lerp(c,clampedHistory(uv,c),temporal.z);
+
+    float4 lo=c,hi=c;
+    float4 a=tex2D(currentFrame,uv+float2(temporal.x,0)); lo=min(lo,a); hi=max(hi,a);
+    float4 b=tex2D(currentFrame,uv-float2(temporal.x,0)); lo=min(lo,b); hi=max(hi,b);
+    float4 d=tex2D(currentFrame,uv+float2(0,temporal.y)); lo=min(lo,d); hi=max(hi,d);
+    float4 e=tex2D(currentFrame,uv-float2(0,temporal.y)); lo=min(lo,e); hi=max(hi,e);
+    float4 h=clamp(tex2D(historyFrame,prevUv),lo,hi);
     return lerp(c,h,temporal.z);
 }
 )HLSL";
@@ -186,19 +293,28 @@ sampler2D sourceMask:register(s0);
 // xy=sun position, z=total ray reach, w=per-sample decay
 float4 radial:register(c0);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
-    float2 stepUv=(radial.xy-uv)*(radial.z/16.0);
+    // 28 taps (was 16): smoother falloff/less banding on long reaches,
+    // still cheap at half-res.
+    static const int kSamples=28;
+    float2 stepUv=(radial.xy-uv)*(radial.z/float(kSamples));
     float illumination=1;
     float weightSum=0;
     float4 light=0;
     float2 q=uv;
-    [unroll] for(int i=0;i<16;++i) {
+    [unroll] for(int i=0;i<kSamples;++i) {
         q+=stepUv;
         float weight=illumination;
         light+=tex2D(sourceMask,q)*weight;
         weightSum+=weight;
         illumination*=radial.w;
     }
-    light.rgb=light.rgb/max(weightSum,.001)*1.1;
+    light.rgb=light.rgb/max(weightSum,.001);
+    // Contrast lift: a plain weighted average reads as a soft, low-contrast
+    // glow (the "blob" look) because most of the sampled path is usually
+    // empty sky diluting the mean. A sub-1 power pulls dim/mid values up
+    // faster than bright ones, so partial-occlusion streaks (branches,
+    // rooflines) read as more defined beams instead of a uniform wash.
+    light.rgb=pow(saturate(light.rgb),0.72)*1.2;
     light.a=1;
     return light;
 }
@@ -228,6 +344,28 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float rawBright=saturate((rawPeak-localTuning.w)/max(1-localTuning.w,.01));
     float3 glow=(localMode.x>.5?float3(rawBright,0,0):sourceAt(uv))*localTuning.z*24.0;
     return float4(glow,1);
+}
+)HLSL";
+
+// Debug-only crosshair drawn at the exact screen position rays/glare use for
+// the celestial source. If this ring does not sit on the real sun/moon disc
+// at any yaw/pitch, the source projection is still wrong - this is the check.
+inline const char* celestialMarkerPixelSource=R"HLSL(
+// xy=target uv, z=valid, w=unused
+float4 markerTarget:register(c0);
+float4 markerColor:register(c1);
+// xy=1/render size (pixels -> uv)
+float4 markerSize:register(c2);
+float4 main(float2 uv:TEXCOORD0):COLOR0 {
+    float valid=markerTarget.z;
+    float2 d=(uv-markerTarget.xy)/markerSize.xy;
+    float dist=length(d);
+    float ring=abs(dist-16.0);
+    float ringMask=1-smoothstep(1.2,2.6,ring);
+    float onXAxis=(1-smoothstep(1.2,2.2,abs(d.y)))*step(6.0,dist)*step(dist,26.0);
+    float onYAxis=(1-smoothstep(1.2,2.2,abs(d.x)))*step(6.0,dist)*step(dist,26.0);
+    float mask=saturate(ringMask+onXAxis+onYAxis)*valid;
+    return float4(markerColor.rgb*mask,mask);
 }
 )HLSL";
 

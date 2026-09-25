@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
+#include "src/D3D9/CelestialTracker.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 bool enabled=false, active=true, keyDown=false, hotkey=true;
@@ -17,6 +18,16 @@ float waterDebugMode=0;
 IDirect3DTexture9* reflectionScene=nullptr;
 IDirect3DTexture9* reflectionDepth=nullptr;
 float reflectionData[12]{};
+// Set once per frame by VolumeIntegration.h (BeforeClear) to persistent,
+// frame-cleared render targets. Bound as extra render targets during every
+// matched water draw below so water can mark its own pixels (coverage) and
+// its own surface depth for the atmosphere pass - see
+// FrameContext::waterMaskTexture / waterDepthTexture. The atmosphere ray
+// must stop at the water SURFACE, not the seabed depth already sitting in
+// the main depth buffer (water doesn't write it) - see
+// DirectionalVolumetricLighting.cpp's boundary-depth pass.
+IDirect3DSurface9* waterMaskSurface=nullptr;
+IDirect3DSurface9* waterDepthSurface=nullptr;
 std::vector<DWORD> code,vertexCode;
 inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
@@ -88,7 +99,21 @@ float3 noiseGradient(float2 p) {
     return float3(a+(b-a)*u.x+(c-a)*u.y+k*u.x*u.y,
                   du.x*((b-a)+k*u.y),du.y*((c-a)+k*u.x));
 }
-float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3):COLOR0 {
+// Second output (COLOR1): marks this pixel as water, so the atmosphere
+// pass knows where the water surface actually is (not the seabed depth
+// already sitting in the main depth buffer - water doesn't write that).
+// Written as opaque white; the GPU's normal alpha blend (the same one
+// used for the colour output) turns it into a real per-pixel "how much of
+// this ended up as water" fraction, not a flat 0/1, so partially-blended
+// shore edges are partial too.
+// Third output (COLOR2): the water surface's own view-space depth
+// (viewPos.z), for the atmosphere to march air only from the camera to
+// THIS point, not through the water down to the seabed.
+struct WaterOutput { float4 color:COLOR0; float4 mask:COLOR1; float4 surfaceDepth:COLOR2; };
+WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float fog:FOG,float3 viewPos:TEXCOORD2,float3 viewNormal:TEXCOORD3) {
+    WaterOutput result_;
+    result_.surfaceDepth=float4(viewPos.z,0,0,1);
+    result_.mask=float4(1,1,1,1);
     // Preserve the original alpha: surfaceTexture never contributes alpha.
     float4 base=tex2D(baseTexture,uv0);
     float time=controls.x*flowControl.x;
@@ -143,13 +168,23 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     float waterDepth=abs(behindZ-viewPos.z);
     float captureValid=reflectionStyle.w;
     float depthValid=captureValid*step(behindZ,99999);
+    // Open ocean has no seafloor within the depth buffer at all (behindRaw
+    // reads as sky), so depthValid was 0 here - which used to zero every
+    // absorption/tint term below AND still sample sceneTexture unmodified
+    // at screenUV as "refracted", i.e. literally paint raw sky colour onto
+    // the water. That is exactly what read as "the sea looks transparent"
+    // no matter how high DepthAbsorptionPercent was set: absorption was
+    // gated to zero regardless of the slider. No floor found means this is
+    // genuinely deep, not "not water" - treat it as maximum depth instead.
+    float openOcean=1-depthValid;
+    float effectiveDepth=lerp(waterDepth,9999.0,openOcean);
     float2 refractOffset=slopes*float2(reflectionControl.y,reflectionControl.z)*(15+waterStyle.x*120);
     float2 refractUV=screenUV+(depthValid?refractOffset:float2(0,0));
-    float3 refracted=tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb;
+    float3 refracted=depthValid>.5?tex2Dlod(sceneTexture,float4(refractUV,0,0)).rgb:float3(0,0,0);
     float shallow=saturate(waterDepth/max(waterStyle.w,1e-3));
     float3 deepTint=lerp(fogColor.rgb*.42,float3(.025,.105,.135),.62);
-    float absorption=depthValid*(1-exp(-waterDepth*waterStyle.y*.14));
-    float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),waterDepth);
+    float absorption=captureValid*(1-exp(-effectiveDepth*waterStyle.y*.14));
+    float shallowEdge=1-smoothstep(.08,.08+max(waterStyle.w,.1),effectiveDepth);
     float shore=depthValid*shallowEdge;
     float crest=saturate(.55+a.x*.45+dot(slopes,float2(.18,-.12)));
     float3 l=safeNormalize(-lightDirection.xyz);
@@ -219,13 +254,26 @@ float4 main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,float 
     // 4. Celestial reflection path & shore/crest foam
     float pathEnergy=saturate(celestialPath*controls.w*.85);
     rgb+=max(sheenColor,float3(.20,.22,.24))*pathEnergy;
+    // Broad, warm, roughly circular glow where a CALM mirror (the flat
+    // surface normal `n`, not the wave-perturbed `wave`) would bounce the
+    // sun/moon straight at the camera. The sparkle above is high-frequency
+    // wave-facet glitter - correct, but it reads as scattered texture, not
+    // the coherent warm disc from the reference shots. This is that disc:
+    // same idea as the sparkle (mirror reflection of the light direction)
+    // but evaluated on the smooth normal so it doesn't break up into noise.
+    float haloAlign=saturate(dot(reflect(-v,n),l));
+    float halo=pow(haloAlign,22)*foreverStyle.y*ndl;
+    float3 warmTint=lerp(max(lightColor.rgb,.15),float3(1,.78,.5),.35);
+    rgb+=warmTint*halo*1.6;
     float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
     float foamAmount=(shore+waveFoam*foreverStyle.w)*crest*waterStyle.z;
     rgb+=float3(.42,.48,.43)*foamAmount;
-    if(flowControl.z>.5)return float4(1,0,1,1);
+    if(flowControl.z>1.5){result_.color=float4(saturate((pathEnergy+halo)*3).xxx,1);return result_;}
+    if(flowControl.z>.5){result_.color=float4(1,0,1,1);return result_;}
     float baseAlpha=color.a*base.a;
     float depthAlpha=absorption*(.78-.20*fresnel);
-    return float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
+    result_.color=float4(fog*(rgb-fogColor.rgb)+fogColor.rgb,saturate(baseAlpha+(1-baseAlpha)*depthAlpha));
+    return result_;
 }
 )HLSL";
 int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};GetPrivateProfileStringW(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):GetPrivateProfileIntW(L"Water",key,fallback,mainIni.c_str());}
@@ -252,7 +300,11 @@ void ReloadTuning(){
     fresnelStrength=std::clamp(ReadTuning(L"FresnelPercent",100),0,200)*.01f;
     crestFoamStrength=std::clamp(ReadTuning(L"CrestFoamPercent",20),0,100)*.01f;
     geometryWaveAmplitude=std::clamp(ReadTuning(L"GeometryWavePercent",10),0,35)*.01f;
-    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,1));
+    // 0=off, 1=solid magenta (confirms this pixel is our water shader),
+    // 2=grayscale celestial-glint term only (x3 gain), isolated from the
+    // rest of the water shading - for debugging "the sun path isn't
+    // showing" without guessing which term is actually zero.
+    waterDebugMode=float(std::clamp(ReadTuning(L"WaterDebugMode",0),0,2));
     if(!logPath.empty()){std::ofstream out(std::filesystem::path(logPath),std::ios::app);out<<"tuning ripple="<<strength<<" normal="<<normalStrength<<" specular="<<specularStrength<<" reflection="<<reflectionStrength<<" environment="<<environmentStrength<<" distance="<<reflectionDistance<<" thickness="<<reflectionThickness<<" flow="<<flowSpeed<<','<<flowRotation<<" refract="<<refractionStrength<<" absorption="<<absorptionStrength<<" foam="<<shoreFoamStrength<<','<<shoreFoamWidth<<" forever="<<swellStrength<<','<<sunGlintStrength<<','<<fresnelStrength<<','<<crestFoamStrength<<" debug="<<waterDebugMode<<'\n';}
 }
 void Configure(const std::wstring& base) {
@@ -313,13 +365,18 @@ struct Scope {
     float old[36]{},oldVertexControls[4]{};
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
+    ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
+    ComPtr<IDirect3DSurface9> oldDepthRT;bool depthBound=false;
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
         // Fast early exit: only water shaders need the rest of this expensive setup
         uint64_t psHash = renderer::g_trackedState.psHash;
         uint64_t vsHash = renderer::g_trackedState.vsHash;
+        // 0x48a82796bd612aeb: extra near-camera water vertex shader (same
+        // pixel shader, same 8x64/512x512 texture layout below - confirmed
+        // via WaterDiag capture, it was just missing from this list).
         if ((psHash!=0x17f042a7906ca126ull && psHash!=0x7d4f078fa1876a09ull) ||
-            (vsHash!=0x206d861fd0a721ddull && vsHash!=0xfdd9528ed3ac30eaull))
+            (vsHash!=0x206d861fd0a721ddull && vsHash!=0xfdd9528ed3ac30eaull && vsHash!=0x48a82796bd612aebull))
             return;
         try {
             // Check texture layout: slot 0 is 8x64 ripple LUT, slot 1 is 512x512 wave normal
@@ -338,6 +395,25 @@ struct Scope {
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
             float controls[36]={float(GetTickCount64()%600000)*.001f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
+            // Prefer CelestialTracker's confirmed sun/moon direction (from
+            // the actual disc draw call, same source the sky rays/glow use)
+            // over WoW's own light-direction constant for the glint path -
+            // that constant can drift from the visible disc (the whole
+            // reason CelestialTracker exists), which showed up as the water
+            // "sun road" pointing at empty sky instead of the real sun.
+            // viewSpaceDirection already points TOWARD the source; the
+            // shader negates lightDirection to get that vector, so upload
+            // it pre-negated.
+            {
+                const renderer::CelestialBody& sunBody=renderer::CelestialTracker::Instance().Sun();
+                const renderer::CelestialBody& moonBody=renderer::CelestialTracker::Instance().Moon();
+                const renderer::CelestialBody* body=sunBody.visible?&sunBody:(moonBody.visible?&moonBody:nullptr);
+                if(body){
+                    controls[4]=-body->viewSpaceDirection.x;
+                    controls[5]=-body->viewSpaceDirection.y;
+                    controls[6]=-body->viewSpaceDirection.z;
+                }
+            }
             memcpy(controls+12,reflectionData,sizeof(reflectionData));
             controls[16]=reflectionsEnabled&&reflectionScene&&reflectionDepth?reflectionStrength:0;
             controls[20]=reflectionsEnabled?environmentStrength:0;controls[21]=reflectionDistance;controls[22]=reflectionThickness;controls[23]=reflectionScene&&reflectionDepth?1.f:0.f;
@@ -365,6 +441,14 @@ struct Scope {
             }
             if(FAILED(d->SetPixelShader(replacement.Get()))){Restore();return;}
             device=d;
+            if(waterMaskSurface){
+                d->GetRenderTarget(1,oldMaskRT.GetAddressOf());
+                if(SUCCEEDED(d->SetRenderTarget(1,waterMaskSurface))) maskBound=true;
+            }
+            if(waterDepthSurface){
+                d->GetRenderTarget(2,oldDepthRT.GetAddressOf());
+                if(SUCCEEDED(d->SetRenderTarget(2,waterDepthSurface))) depthBound=true;
+            }
             static bool reported=false;
             if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched water PS + texture layout; replacement active\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
             static bool reflectionReported=false;if(extraState&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
@@ -372,7 +456,7 @@ struct Scope {
             ++frameMatches;
         }catch(...){Restore();}
     }
-    void Restore() noexcept {if(device){device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}device=nullptr;}}
+    void Restore() noexcept {if(device){device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}if(maskBound){device->SetRenderTarget(1,oldMaskRT.Get());maskBound=false;}if(depthBound){device->SetRenderTarget(2,oldDepthRT.Get());depthBound=false;}device=nullptr;}}
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;
     Scope& operator=(const Scope&)=delete;

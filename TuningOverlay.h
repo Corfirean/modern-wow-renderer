@@ -16,16 +16,25 @@ inline std::vector<Item> items={
  // === ATMOSPHERE & GOD RAYS ===
  {KIND_HEADER,nullptr,nullptr,"--- ATMOSPHERE & GOD RAYS ---",0,0,0,0},
  {KIND_TOGGLE,L"Atmosphere",L"ShaftsEnabled","SUN RAYS",0,1,1,1},
- {KIND_TOGGLE,L"Atmosphere",L"DirectionalVolumetricEnabled","VOLUMETRIC (HEAVY)",0,1,1,0},
  {KIND_SLIDER,L"Atmosphere",L"ShaftPercent","RAY STRENGTH",0,400,5,160},
  {KIND_SLIDER,L"Atmosphere",L"SunGlowPercent","SUN GLOW",0,200,5,80},
- {KIND_SLIDER,L"Atmosphere",L"SunVerticalProjectionPercent","SUN VERT SCALE",10,100,2,40},
- {KIND_SLIDER,L"Atmosphere",L"SunOffsetYPercent","SUN OFFSET Y",-50,50,1,0},
  {KIND_TOGGLE,L"Atmosphere",L"FogEnabled","FOG",0,1,1,1},
- {KIND_TOGGLE,L"DistanceFog",L"Enabled","DISTANCE HAZE",0,1,1,1},
+ // Derives fog distance/colour from WoW's own authored values for the
+ // current zone/shader (read-only capture) instead of one fixed profile
+ // everywhere - FOG DISTANCE still scales it. Off = old fixed profile.
+ {KIND_TOGGLE,L"Atmosphere",L"UseEnvironmentFog","WOW FOG BASELINE",0,1,1,0},
+ {KIND_SLIDER,L"Atmosphere",L"AtmosphereQuality","ATMOSPHERE QUALITY",0,2,1,1},
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
- {KIND_SLIDER,L"Atmosphere",L"BaseHeight","FOG BASE HEIGHT",-50,200,2,28},
- {KIND_SLIDER,L"Atmosphere",L"FogWashPercent","FOG WASH",0,100,2,35},
+ {KIND_SLIDER,L"Atmosphere",L"AtmosphereMaxDistance","FOG DISTANCE",200,1200,20,520},
+ {KIND_SLIDER,L"Atmosphere",L"AtmosphereWashPercent","FOG WASH",0,100,2,55},
+ // Rescales the GAME's OWN native distance fog (its real per-shader fog
+ // constants, the same ones vanilla WoW uses to hide its own render/
+ // streaming distance edge) - independent of the atmosphere controls
+ // above. This is what actually guarantees the world edge stays covered
+ // regardless of any other setting here.
+ {KIND_TOGGLE,L"DistanceFog",L"Enabled","WORLD EDGE FOG",0,1,1,1},
+ {KIND_SLIDER,L"DistanceFog",L"DistancePercent","EDGE FOG DISTANCE",10,300,5,130},
+ {KIND_SLIDER,L"DistanceFog",L"PowerPercent","EDGE FOG POWER",10,300,5,30},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},

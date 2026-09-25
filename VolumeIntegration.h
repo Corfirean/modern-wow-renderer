@@ -12,6 +12,8 @@
 #include "src/D3D9/ScopedRenderState.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
+#include "src/Diagnostics/CelestialMemoryProbe.h"
+#include "src/D3D9/CelestialTracker.h"
 
 namespace volume {
 using Microsoft::WRL::ComPtr;
@@ -40,6 +42,7 @@ struct LegacyVolumeShaders
     ComPtr<IDirect3DPixelShader9> postProcess;
     ComPtr<IDirect3DPixelShader9> rayComposite;
     ComPtr<IDirect3DPixelShader9> localLight;
+    ComPtr<IDirect3DPixelShader9> celestialMarker;
 
     bool Ensure(IDirect3DDevice9* d);
     void Reset();
@@ -81,23 +84,30 @@ LegacyVolumeShaders legacyShaders;
 LegacyFrameTargets legacyTargets;
 
 struct FrameResources {
-    ComPtr<IDirect3DTexture9> depth, noise, shadowDepth, shadowColor;
-    ComPtr<IDirect3DSurface9> surface, originalDepth, target, shadowDepthSurface, shadowColorSurface;
+    ComPtr<IDirect3DTexture9> depth, noise, shadowDepth, shadowColor, waterMask, waterDepth;
+    ComPtr<IDirect3DSurface9> surface, originalDepth, target, shadowDepthSurface, shadowColorSurface, waterMaskSurface, waterDepthSurface;
     IDirect3DDevice9* noiseOwner = nullptr;
     IDirect3DDevice9* shadowOwner = nullptr;
     UINT shadowSize = 0;
+    IDirect3DDevice9* waterMaskOwner = nullptr;
+    UINT waterMaskWidth = 0, waterMaskHeight = 0;
 };
 FrameResources& resources = *new FrameResources;
 auto& depth = resources.depth; auto& surface = resources.surface;
 auto& originalDepth = resources.originalDepth; auto& target = resources.target;
 
-ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, localLightBytecode, radialBytecode, contactShadowBytecode, postProcessBytecode, rayCompositeBytecode;
-float constants[13][4]{};
+ComPtr<ID3DBlob> bytecode, blurBytecode, copyBytecode, temporalBytecode, localLightBytecode, radialBytecode, contactShadowBytecode, postProcessBytecode, rayCompositeBytecode, celestialMarkerBytecode;
+float constants[14][4]{};
 uint64_t cameraCaptureShaderHash = 0;
 float capturedViewTranslation[3]{};
 bool capturedViewValid = false;
 float baseHeight = 60, density = .004f, falloff = .07f, strength = 2.6f, moonStrength = .35f, variation = 1.35f, lowLayer = .35f, raySoftness = 5.f, rayFalloff = 2.f, fogWash = .45f, sunVerticalScale = .4f, sunOffsetX = 0, sunOffsetY = 0, localLightStrength = .8f, localLightThreshold = .25f, sunSourceThreshold = .60f;
-float contactShadowStrength = .28f, contactShadowRadius = 10.f, directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f, localLightRadius = 140.f;
+// Second, independent height-fog layer: low, dense ground mist hugging the
+// terrain, on top of the broader distance haze (`density`/`falloff`/
+// `baseHeight` above). Combined by summing optical depth - physically the
+// right way to stack two independent scattering media along the same ray.
+float groundMistHeight = 4.f, groundMistFalloff = .35f, groundMistDensity = .008f;
+float contactShadowStrength = .28f, contactShadowRadius = 10.f, contactShadowMaxDistance = 6.f, directionalShadowStrength = .16f, shadowMapDistance = 140.f, shadowMapBias = .0008f, shadowSoftness = 1.6f, cloudShadowStrength = .06f, localLightRadius = 140.f;
 UINT configuredShadowMapSize = 1024;
 int brightnessPercent = 0, contrastPercent = 100, gammaPercent = 100, sharpnessPercent = 35;
 int sunGlowPercent = 150;
@@ -112,6 +122,10 @@ float celestialShadowLight = 0;
 float smoothSunX = -1, smoothSunY = -1;
 bool shaftDebug = false;
 bool localLightDebug = false;
+bool celestialMarkerDebug = false;
+bool celestialMemoryProbeDebug = false;
+std::wstring celestialProbeLogPath;
+unsigned celestialProbeLogCounter = 0;
 unsigned frames = 0, applied = 0, depthFrames = 0, cameraFrames = 0, shadowDraws = 0, shadowFrameDraws = 0;
 std::wstring logPath;
 std::wstring mainIni, tuningIni;
@@ -142,6 +156,7 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     if (!postProcessBytecode) D3DCompile(postProcessPixelSource, strlen(postProcessPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, postProcessBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
     if (!rayCompositeBytecode) D3DCompile(rayCompositePixelSource, strlen(rayCompositePixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, rayCompositeBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
     if (!localLightBytecode) D3DCompile(localLightPixelSource, strlen(localLightPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, localLightBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
+    if (!celestialMarkerBytecode) D3DCompile(celestialMarkerPixelSource, strlen(celestialMarkerPixelSource), nullptr, nullptr, nullptr, "main", "ps_3_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, celestialMarkerBytecode.GetAddressOf(), errors.ReleaseAndGetAddressOf());
 
     if (!bytecode || !blurBytecode || !copyBytecode || !temporalBytecode || !radialBytecode || !contactShadowBytecode)
         return false;
@@ -157,6 +172,7 @@ bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
     if (postProcessBytecode) d->CreatePixelShader(static_cast<DWORD*>(postProcessBytecode->GetBufferPointer()), postProcess.GetAddressOf());
     if (rayCompositeBytecode) d->CreatePixelShader(static_cast<DWORD*>(rayCompositeBytecode->GetBufferPointer()), rayComposite.GetAddressOf());
     if (localLightBytecode) d->CreatePixelShader(static_cast<DWORD*>(localLightBytecode->GetBufferPointer()), localLight.GetAddressOf());
+    if (celestialMarkerBytecode) d->CreatePixelShader(static_cast<DWORD*>(celestialMarkerBytecode->GetBufferPointer()), celestialMarker.GetAddressOf());
 
     return true;
 }
@@ -172,6 +188,7 @@ void LegacyVolumeShaders::Reset()
     postProcess.Reset();
     rayComposite.Reset();
     localLight.Reset();
+    celestialMarker.Reset();
     owner = nullptr;
 }
 
@@ -249,6 +266,11 @@ void ReloadTuning() {
     variation = std::clamp(ReadTuning(L"VariationPercent", 135), 0, 250) * .01f;
     moonStrength = std::clamp(ReadTuning(L"MoonShaftPercent", 35), 0, 100) * .01f;
     lowLayer = std::clamp(ReadTuning(L"LowLayerPercent", 35), 0, 150) * .01f;
+    // Ground mist: low, dense, tightly height-limited - a second fog layer
+    // stacked on top of the broad distance haze above, not a replacement.
+    groundMistHeight = float(std::clamp(ReadTuning(L"GroundMistHeight", 4), -20, 60));
+    groundMistFalloff = std::clamp(ReadTuning(L"GroundMistFalloffPermille", 350), 20, 2000) * .001f;
+    groundMistDensity = std::clamp(ReadTuning(L"GroundMistDensityPermille", 8), 0, 40) * .001f;
     raySoftness = float(std::clamp(ReadTuning(L"ShaftSoftnessPixels", 5), 0, 16));
     rayFalloff = std::clamp(ReadTuning(L"ShaftFalloffPercent", 200), 50, 500) * .01f;
     fogWash = std::clamp(ReadTuning(L"FogWashPercent", 35), 0, 100) * .01f;
@@ -261,6 +283,11 @@ void ReloadTuning() {
     sunSourceThreshold = std::clamp(ReadTuning(L"SunSourceThresholdPercent", 60), 10, 95) * .01f;
     contactShadowStrength = std::clamp(ReadTuning(L"ContactShadowPercent", 25), 0, 70) * .01f;
     contactShadowRadius = float(std::clamp(ReadTuning(L"ContactShadowRadiusPixels", 10), 2, 24));
+    // Genuinely local: a "contact" shadow grounds objects and shades creases.
+    // Long-range occlusion belongs to the light-space directional shadow map,
+    // never to this screen-space depth raymarch (off-screen occluders don't
+    // exist here, which is what produced ghosting/disocclusion at long range).
+    contactShadowMaxDistance = float(std::clamp(ReadTuning(L"ContactShadowRangeUnits", 6), 2, 20));
     directionalShadowStrength = std::clamp(ReadTuning(L"DirectionalShadowPercent", 45), 0, 100) * .01f;
     shadowMapDistance = float(std::clamp(ReadTuning(L"ShadowMapDistance", ReadTuning(L"ShadowReach", 180)), 50, 300));
     configuredShadowMapSize = UINT(std::clamp(ReadTuning(L"ShadowMapSize", 1024), 256, 4096));
@@ -274,6 +301,12 @@ void ReloadTuning() {
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
     shaftDebug = ReadTuning(L"ShaftDebugMask", 0) != 0;
     localLightDebug = ReadTuning(L"LocalLightDebugMask", 0) != 0;
+    celestialMarkerDebug = ReadTuning(L"DebugCelestialMarker", 0) != 0;
+    // Read-only comparison of the current v[24]-projection marker (RED)
+    // against two candidate directions read from client-process globals
+    // (GREEN=sun candidate, CYAN=moon candidate) per CelestialMemoryProbe.h.
+    // Off by default; never affects rendering/rays, debug overlay only.
+    celestialMemoryProbeDebug = ReadTuning(L"DebugCelestialMemoryProbe", 0) != 0;
 
     renderer::PerformanceProfiler::Instance().SetGpuProfilingEnabled(ReadTuning(L"GpuProfilingEnabled", 0) != 0);
 
@@ -287,6 +320,7 @@ void Configure(const std::wstring& base) {
     mainIni = base + L"ModernWoWRenderer.ini";
     tuningIni = base + L"GraphicsEffects.ini";
     logPath = base + L"VolumeEffects.log";
+    celestialProbeLogPath = base + L"CelestialProbe.log";
     renderer::PerformanceProfiler::Instance().SetLogPath(logPath);
     renderer::DirectionalVolumetricLighting::Instance().Configure(base);
     enabled = GetPrivateProfileIntW(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
@@ -314,6 +348,11 @@ void Reset(IDirect3DDevice9* d) {
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
     resources.shadowDepth.Reset(); resources.shadowColor.Reset();
     resources.shadowOwner = nullptr; resources.shadowSize = 0;
+    resources.waterMaskSurface.Reset(); resources.waterMask.Reset();
+    resources.waterDepthSurface.Reset(); resources.waterDepth.Reset();
+    resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
+    watereffect::waterMaskSurface = nullptr;
+    watereffect::waterDepthSurface = nullptr;
     shadowFrameStarted = shadowFrameValid = false;
     stableShadowLightValid = false;
     shadowCacheValid = shadowAnchorValid = false;
@@ -351,6 +390,57 @@ void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
         ++frameCtx.frameIndex;
         frameCtx.device = d;
         shadowFrameStarted = false; shadowFrameValid = false; shadowFrameDraws = 0;
+        renderer::CelestialTracker::Instance().BeginFrame(frameCtx.frameIndex);
+
+        // Per-frame water mask: watereffect::Scope binds this as a second
+        // render target during every actual water draw (see WaterEffect.h)
+        // and marks its pixels, blended by the GPU exactly like water's own
+        // colour output. The atmosphere composite reads it back to exclude
+        // fog from water entirely - the low-res, depth-aware fog upsample
+        // was producing a flat, wrong, hard-edged patch of fog colour on
+        // open water (confirmed via AtmosphereDebugMode=9), because water's
+        // constantly animated/refracting/reflecting surface makes that
+        // depth-based reconstruction unreliable right at the water plane.
+        // Sized to the real render target, cleared fresh every frame before
+        // any water draws happen.
+        D3DSURFACE_DESC targetDesc{};
+        if (target && SUCCEEDED(target->GetDesc(&targetDesc))) {
+            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
+                resources.waterMaskHeight != targetDesc.Height || !resources.waterMaskSurface) {
+                resources.waterMask.Reset(); resources.waterMaskSurface.Reset();
+                resources.waterMaskOwner = nullptr; resources.waterMaskWidth = resources.waterMaskHeight = 0;
+                if (SUCCEEDED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, resources.waterMask.GetAddressOf(), nullptr)) &&
+                    SUCCEEDED(resources.waterMask->GetSurfaceLevel(0, resources.waterMaskSurface.GetAddressOf()))) {
+                    resources.waterMaskOwner = d;
+                    resources.waterMaskWidth = targetDesc.Width;
+                    resources.waterMaskHeight = targetDesc.Height;
+                }
+            }
+            if (resources.waterMaskOwner != d || resources.waterMaskWidth != targetDesc.Width ||
+                resources.waterMaskHeight != targetDesc.Height || !resources.waterDepthSurface) {
+                resources.waterDepth.Reset(); resources.waterDepthSurface.Reset();
+                D3DFORMAT depthFmt = D3DFMT_R32F;
+                if (FAILED(d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr))) {
+                    depthFmt = D3DFMT_A16B16G16R16F;
+                    d->CreateTexture(targetDesc.Width, targetDesc.Height, 1, D3DUSAGE_RENDERTARGET,
+                        depthFmt, D3DPOOL_DEFAULT, resources.waterDepth.GetAddressOf(), nullptr);
+                }
+                if (resources.waterDepth)
+                    resources.waterDepth->GetSurfaceLevel(0, resources.waterDepthSurface.GetAddressOf());
+            }
+            if (resources.waterMaskSurface) {
+                d->ColorFill(resources.waterMaskSurface.Get(), nullptr, 0);
+                watereffect::waterMaskSurface = resources.waterMaskSurface.Get();
+                frameCtx.waterMaskTexture = resources.waterMask.Get();
+            }
+            if (resources.waterDepthSurface) {
+                d->ColorFill(resources.waterDepthSurface.Get(), nullptr, 0);
+                watereffect::waterDepthSurface = resources.waterDepthSurface.Get();
+                frameCtx.waterDepthTexture = resources.waterDepth.Get();
+            }
+        }
     }
 }
 
@@ -414,6 +504,11 @@ bool CaptureCamera(IDirect3DDevice9* d) {
         frameCtx.depthTexture = resources.depth.Get();
         frameCtx.depthSurface = resources.surface.Get();
         frameCtx.depthAvailable = (resources.depth != nullptr);
+        // c13: second height-fog layer (ground mist) - x=height,y=falloff,z=density
+        constants[13][0] = groundMistHeight;
+        constants[13][1] = groundMistFalloff;
+        constants[13][2] = groundMistDensity;
+        constants[13][3] = 0.f;
     }
     return ok;
 }
@@ -487,14 +582,28 @@ void BuildShadowCamera() {
     ctx.shadowMapDistance = shadowMapDistance;
 }
 
+// SAFETY GATE - do not flip this via ini. Reported in-game: shadow
+// orientation changing with camera rotation, jagged/crawling silhouettes,
+// and a client crash while this light-space path was exercised. It saves/
+// restores render state and vertex-shader constants around REPLAYING the
+// original WoW draw call into the shadow target - that replay has not been
+// proven state-safe (texture stages/samplers/alpha-ref/vertex declaration
+// are never saved or restored, only a fixed constant-register range and a
+// handful of render states are). Until that is audited and the world-space
+// stability issue is root-caused, this path must stay unreachable even if
+// ShadowMapEnabled=1 is set in GraphicsEffects.ini.
+constexpr bool kAllowExperimentalLightSpaceShadows = false;
+
 inline bool ShouldUpdateShadows()
 {
+    if (!kAllowExperimentalLightSpaceShadows) return false;
     if (!enabled || !active || internal || !shadowsEffectEnabled || !shadowMapEnabled || directionalShadowStrength <= 0)
         return false;
     return (frames % shadowMapUpdateInterval == 0);
 }
 
 template<class DrawCall> void ShadowDraw(IDirect3DDevice9* d, const renderer::DrawClassification& dc, DrawCall&& draw) {
+    if (!kAllowExperimentalLightSpaceShadows) return;
     if (!enabled || !active || internal || !ready || !shadowsEffectEnabled || !shadowMapEnabled || directionalShadowStrength <= 0 || owner != d) return;
     if (!dc.castsShadow) return;
     if (!volumetricCharacterShadows &&
@@ -612,6 +721,73 @@ bool Composite(IDirect3DDevice9* d) {
     if (!EnsureNoise(d)) return false;
     if (!legacyShaders.Ensure(d)) return false;
 
+    // Real celestial source override. Replaces the v[24]-projection
+    // ("assume the light-direction shader constant is the disc's screen
+    // position") that in-game testing disproved. CelestialTracker
+    // intercepts the actual sun/moon billboard draw call each frame (see
+    // src/D3D9/CelestialTracker.h for the two confirmed draw signatures)
+    // and reports its true screen position and view direction - only for
+    // frames where that draw call actually happened, so an off-screen or
+    // below-horizon body naturally yields no source instead of a guessed
+    // one. constants[2]/constants[10] are re-uploaded to the shaders below
+    // via SetPixelShaderConstantF, so overriding them here in place before
+    // any of those uploads happen is sufficient - no separate plumbing.
+    {
+        const renderer::CelestialBody& sun = renderer::CelestialTracker::Instance().Sun();
+        const renderer::CelestialBody& moon = renderer::CelestialTracker::Instance().Moon();
+        // Gating strength on celestialDaylight (the OLD, separate v[26]-
+        // luminance/tint heuristic) was a leftover mistake: it can read
+        // near-zero in perfectly sunny scenes with a cool/blue-tinted
+        // direct light color (this server's skies lean that way), silently
+        // killing rays even though CelestialTracker has ALREADY confirmed
+        // the real sun disc is drawn and visible this frame - a marker
+        // sitting correctly on the sun with no rays was exactly that bug.
+        // Visibility from the actual draw call is the ground truth now;
+        // it doesn't need a second, weaker opinion to also say yes.
+        bool useSun = sun.visible;
+        bool useMoon = !useSun && moon.visible;
+        const renderer::CelestialBody* body = useSun ? &sun : (useMoon ? &moon : nullptr);
+        if (body) {
+            constants[2][0] = body->screenX;
+            constants[2][1] = body->screenY;
+            constants[2][2] = useSun ? strength : strength * moonStrength;
+            constants[10][0] = body->viewSpaceDirection.x;
+            constants[10][1] = body->viewSpaceDirection.y;
+            constants[10][2] = body->viewSpaceDirection.z;
+            constants[10][3] = 0.f;
+        } else {
+            constants[2][0] = -2.f;
+            constants[2][1] = -2.f;
+            constants[2][2] = 0.f;
+        }
+
+        // CelestialTracker is the single source of truth for celestial
+        // direction/position; mirror it into FrameContext too so anything
+        // else reading these (currently only the debug-only, off-by-default
+        // DirectionalVolumetricLighting path) can't disagree with it by
+        // still carrying the old v[24]-derived value.
+        auto& frameCtx = renderer::FrameContext::Current();
+        if (body) {
+            frameCtx.sunScreenX = body->screenX;
+            frameCtx.sunScreenY = body->screenY;
+            frameCtx.sunStrength = constants[2][2];
+            frameCtx.sunDirectionView = body->viewSpaceDirection;
+            frameCtx.sunDirectionWorld = body->worldSpaceDirection;
+            // Source kind and visibility come from CelestialTracker. The
+            // atmosphere owns the sun/moon intensity ratio, so keep this a
+            // normalized visibility signal instead of applying moon strength
+            // twice (once here and once in the medium integration).
+            frameCtx.celestialIntensity = 1.f;
+            frameCtx.celestialIsMoon = useMoon;
+        } else {
+            frameCtx.sunScreenX = -1.f;
+            frameCtx.sunScreenY = -1.f;
+            frameCtx.sunStrength = 0.f;
+            frameCtx.celestialIntensity = 0.f;
+            frameCtx.celestialIsMoon = false;
+        }
+    }
+
     D3DSURFACE_DESC desc{};
     if (FAILED(target->GetDesc(&desc))) return false;
 
@@ -627,6 +803,7 @@ bool Composite(IDirect3DDevice9* d) {
     auto& frameCtx = renderer::FrameContext::Current();
     frameCtx.sceneColor = legacyTargets.scene.Get();
     frameCtx.sceneSurface = legacyTargets.sceneSurface.Get();
+    frameCtx.atmosphereNoise = resources.noise.Get();
 
     // Lightweight scoped render state backup (NO D3DSBT_ALL)
     renderer::ScopedRenderState scopedState(d);
@@ -681,68 +858,63 @@ bool Composite(IDirect3DDevice9* d) {
 
     D3DVIEWPORT9 fullVp{ 0, 0, desc.Width, desc.Height, 0, 1 };
     check(d->SetViewport(&fullVp));
-    check(d->SetPixelShaderConstantF(0, constants[0], 13));
+    check(d->SetPixelShaderConstantF(0, constants[0], 14));
 
-    // Screen-space contact shadows
-    if (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
+    // Screen-space contact shadows.
+    // Rendered DIRECTLY onto the bound scene target (`target`, already the
+    // active render target here) with a ZERO/SRCCOLOR modulate blend - no
+    // intermediate render target at all. The previous version wrote this
+    // pass into `legacyTargets.rayA`, a texture allocated at HALF resolution
+    // (rayWidth/rayHeight), while setting a FULL-resolution viewport and
+    // drawing a full-resolution quad into it: the rasterizer clips to the
+    // actual half-size surface, so only a quarter of the intended shadow
+    // data was ever written, then sampled back over the full screen. That
+    // size mismatch - not the blur - is what produced the large moving
+    // ghost/projection artifacts. Writing straight to the real full-res
+    // target removes the mismatch entirely, and also removes two full-screen
+    // passes (the old copy+blend) that this used to cost.
+    // The trace range is also now genuinely local: this is a *contact*
+    // shadow (grounding/creases), not a stand-in for directional shadows -
+    // long-range occlusion belongs to the light-space shadow map below.
+    // SAFETY GATE - disabled from production regardless of ini. In-game
+    // testing reported the shadow crawling/changing shape with camera
+    // movement and jagged silhouettes even after the render-target fix.
+    // Reconstructing anything beyond a small ground-contact shadow from the
+    // screen-space depth buffer is the wrong tool (no off-screen occluder
+    // data), and this must not stand in for real directional shadows. Kept
+    // as diagnostic-only until re-scoped to ~0.5-2 unit contact range per
+    // the Phase 5 plan, layered on top of WoW's native shadows rather than
+    // replacing them.
+    constexpr bool kAllowScreenSpaceContactShadow = false;
+    if (kAllowScreenSpaceContactShadow && !shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0) {
         renderer::ScopedCpuTimer contactTimer(renderer::PerfStage::ContactShadows);
-        check(d->SetRenderTarget(0, legacyTargets.rayASurface.Get()));
-        D3DVIEWPORT9 shadowVp{ 0, 0, rayWidth, rayHeight, 0, 1 };
-        check(d->SetViewport(&shadowVp));
         check(d->SetPixelShader(legacyShaders.contactShadow.Get()));
         check(d->SetTexture(0, depth.Get()));
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
         float shadowTuning[4] = { 1.f / desc.Width, 1.f / desc.Height, contactShadowStrength,
-                                  std::clamp(shadowMapDistance * .35f, 12.f, 90.f) };
+                                  contactShadowMaxDistance };
         float contactShadowProjection[4] = { constants[0][0], constants[0][1], constants[0][2], constants[0][3] };
         float contactShadowLight[4] = { constants[10][0], constants[10][1], constants[10][2], constants[2][3] };
         check(d->SetPixelShaderConstantF(0, shadowTuning, 1));
         check(d->SetPixelShaderConstantF(1, contactShadowProjection, 1));
         check(d->SetPixelShaderConstantF(2, contactShadowLight, 1));
-        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-        if (ok) drawQuad(rayWidth, rayHeight);
-
-        check(d->SetTexture(0, nullptr));
-        check(d->SetPixelShader(legacyShaders.blur.Get()));
-        check(d->SetRenderTarget(0, legacyTargets.rayBSurface.Get()));
-        check(d->SetTexture(0, legacyTargets.rayA.Get()));
-        check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
-        check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-        float shadowBlur[4] = { .8f / rayWidth, .8f / rayHeight, 0, 0 };
-        check(d->SetPixelShaderConstantF(0, shadowBlur, 1));
-        if (ok) drawQuad(rayWidth, rayHeight);
-
-        check(d->SetTexture(0, nullptr));
-        check(d->SetRenderTarget(0, target.Get()));
-        check(d->SetViewport(&fullVp));
-        check(d->SetPixelShader(legacyShaders.copy.Get()));
-        check(d->SetTexture(0, legacyTargets.rayB.Get()));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
         check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ZERO));
         check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_SRCCOLOR));
         if (ok) drawQuad(desc.Width, desc.Height);
 
         check(d->SetTexture(0, nullptr));
+        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
         check(d->SetPixelShader(legacyShaders.volume.Get()));
         check(d->SetTexture(1, depth.Get()));
         check(d->SetTexture(2, resources.noise.Get()));
-        check(d->SetPixelShaderConstantF(0, constants[0], 13));
+        check(d->SetPixelShaderConstantF(0, constants[0], 14));
     }
 
-    // Atmospheric Height Fog
-    if (!shaftDebug && fogEffectEnabled) {
-        renderer::ScopedCpuTimer fogTimer(renderer::PerfStage::HeightFog);
-        float fogMode[4] = { 3, constants[8][1], 0, 0 };
-        check(d->SetPixelShaderConstantF(8, fogMode, 1));
-        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
-        check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
-        check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
-        if (ok) drawQuad(desc.Width, desc.Height);
-    }
-
-    // Directional Volumetric Lighting (World-Space Raymarch)
-    if (shaftsEffectEnabled)
+    // Dedicated low-resolution atmosphere. This replaces the old full-res
+    // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
+    if (!shaftDebug && fogEffectEnabled)
         renderer::DirectionalVolumetricLighting::Instance().Render(d, renderer::FrameContext::Current(), target.Get());
 
     // Secondary Sun Radial Glare pass
@@ -758,8 +930,13 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetTexture(0, legacyTargets.scene.Get()));
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-        check(d->SetPixelShaderConstantF(0, constants[0], 13));
-        float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f * sunGlareStrength, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
+        check(d->SetPixelShaderConstantF(0, constants[0], 14));
+        // y is the SUN GLOW slider as a clean 0..3 scale (100% -> 1.0). Used
+        // to be pre-multiplied by sunGlareStrength (0..~0.45 in practice),
+        // which squashed the whole slider into a barely-perceptible range -
+        // see the amount formula in volumePixelSource for the other half of
+        // that fix.
+        float shaftMode[4] = { shaftDebug ? 7.f : 6.f, float(sunGlowPercent) * 0.01f, shaftDebug ? 1.f : 0.f, sunSourceThreshold };
         check(d->SetPixelShaderConstantF(8, shaftMode, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
 
@@ -771,7 +948,14 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
         check(d->SetRenderTarget(0, legacyTargets.rayBSurface.Get()));
         check(d->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1, 0));
-        float radial[4] = { constants[2][0], constants[2][1], .78f, .958f };
+        // Reach/decay were hardcoded (.78/.958) - ShaftFalloffPercent (the
+        // "RAY LENGTH" knob, documented as "higher = shorter rays") was
+        // read into rayFalloff but never actually consumed by this pass.
+        // Wired up now: higher rayFalloff -> faster per-sample decay ->
+        // visibly shorter rays, matching what the slider already claimed.
+        float radialReach = .88f;
+        float radialDecay = pow(.975f, std::max(rayFalloff, .3f));
+        float radial[4] = { constants[2][0], constants[2][1], radialReach, radialDecay };
         check(d->SetPixelShaderConstantF(0, radial, 1));
         if (ok) drawQuad(rayWidth, rayHeight);
 
@@ -798,6 +982,7 @@ bool Composite(IDirect3DDevice9* d) {
 
         IDirect3DTexture9* finalRays = legacyTargets.rayB.Get();
         if (!shaftDebug && temporalShaftsEnabled && legacyTargets.rayHistory && legacyTargets.rayHistorySurface) {
+            auto& tempCtx = renderer::FrameContext::Current();
             check(d->SetRenderTarget(0, legacyTargets.rayASurface.Get()));
             check(d->SetPixelShader(legacyShaders.temporal.Get()));
             check(d->SetTexture(0, legacyTargets.rayB.Get()));
@@ -806,12 +991,30 @@ bool Composite(IDirect3DDevice9* d) {
             check(d->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
             check(d->SetSamplerState(1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
             check(d->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
+            check(d->SetTexture(2, depth.Get()));
+            check(d->SetSamplerState(2, D3DSAMP_MINFILTER, D3DTEXF_POINT));
+            check(d->SetSamplerState(2, D3DSAMP_MAGFILTER, D3DTEXF_POINT));
+            check(d->SetSamplerState(2, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(2, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
             float temporal[4] = { 1.f / rayWidth, 1.f / rayHeight, .72f, legacyTargets.historyValid ? 1.f : 0.f };
             check(d->SetPixelShaderConstantF(0, temporal, 1));
+            // Reuse this frame's already-captured projection/inverse-view/
+            // camera-position (constants[0], constants[4..7]) for world-
+            // position reconstruction, plus LAST frame's raw view matrix for
+            // the actual reprojection - see volumeTemporalPixelSource.
+            check(d->SetPixelShaderConstantF(1, constants[0], 1));
+            check(d->SetPixelShaderConstantF(2, constants[4], 4));
+            float prevView[4][4];
+            for (int row = 0; row < 4; ++row)
+                for (int col = 0; col < 4; ++col)
+                    prevView[row][col] = tempCtx.previousViewRaw.m[row][col];
+            prevView[0][3] = tempCtx.previousViewValid ? 1.f : 0.f;
+            check(d->SetPixelShaderConstantF(6, prevView[0], 4));
             if (ok) drawQuad(rayWidth, rayHeight);
 
             check(d->SetTexture(0, nullptr));
             check(d->SetTexture(1, nullptr));
+            check(d->SetTexture(2, nullptr));
             check(d->StretchRect(legacyTargets.rayASurface.Get(), nullptr, legacyTargets.rayHistorySurface.Get(), nullptr, D3DTEXF_NONE));
             legacyTargets.historyValid = ok;
             finalRays = legacyTargets.rayA.Get();
@@ -852,6 +1055,86 @@ bool Composite(IDirect3DDevice9* d) {
             check(d->SetPixelShaderConstantF(0, postParams, 1));
             check(d->SetPixelShaderConstantF(1, rsize, 1));
             if (ok) drawQuad(desc.Width, desc.Height);
+        }
+    }
+
+    // Debug: crosshair(s) at the screen position(s) various sun/moon source
+    // hypotheses land on. Confirms (or disproves) that a given source
+    // tracking method sits on the real sun/moon disc.
+    if ((celestialMarkerDebug || celestialMemoryProbeDebug) && legacyShaders.celestialMarker) {
+        check(d->SetViewport(&fullVp));
+        check(d->SetPixelShader(legacyShaders.celestialMarker.Get()));
+        check(d->SetTexture(0, nullptr));
+        float markerSize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
+        check(d->SetPixelShaderConstantF(2, markerSize, 1));
+        check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE));
+        check(d->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA));
+        check(d->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA));
+
+        auto drawMarker = [&](float x, float y, bool valid, float r, float g, float b) {
+            float markerTarget[4] = { x, y, valid ? 1.f : 0.f, 0 };
+            float markerColor[4] = { r, g, b, 1.f };
+            check(d->SetPixelShaderConstantF(0, markerTarget, 1));
+            check(d->SetPixelShaderConstantF(1, markerColor, 1));
+            if (ok) drawQuad(desc.Width, desc.Height);
+        };
+
+        // RED (or the original yellow/blue when the memory probe overlay is
+        // off): the current v[24]-projection marker used by rays/glare.
+        bool legacyValid = constants[2][0] > -0.5f && constants[2][1] > -0.5f;
+        if (celestialMemoryProbeDebug) {
+            drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .15f, .15f);
+        } else {
+            bool moonDominant = celestialMoonlight > celestialDaylight;
+            if (moonDominant) drawMarker(constants[2][0], constants[2][1], legacyValid, .55f, .70f, 1.f);
+            else drawMarker(constants[2][0], constants[2][1], legacyValid, 1.f, .85f, .25f);
+        }
+
+        // GREEN / CYAN: candidates read from CelestialMemoryProbe (see that
+        // file for exactly what is and isn't verified). Projected with the
+        // same true-perspective formula as the legacy path, no offset/scale.
+        if (celestialMemoryProbeDebug) {
+            renderer::CelestialProbeSample probe = renderer::CelestialMemoryProbe::Instance().Sample();
+
+            auto projectAndDraw = [&](bool valid, const renderer::Vec3& toLightWorld, float r, float g, float b) {
+                if (!valid) { drawMarker(-2.f, -2.f, false, r, g, b); return; }
+                float vx = toLightWorld.x * constants[4][0] + toLightWorld.y * constants[5][0] + toLightWorld.z * constants[6][0];
+                float vy = toLightWorld.x * constants[4][1] + toLightWorld.y * constants[5][1] + toLightWorld.z * constants[6][1];
+                float vz = toLightWorld.x * constants[4][2] + toLightWorld.y * constants[5][2] + toLightWorld.z * constants[6][2];
+                bool inFront = vz > 0.02f;
+                float sx = -2.f, sy = -2.f;
+                if (inFront) {
+                    float invZ = 1.f / vz;
+                    sx = 0.5f + 0.5f * vx * invZ * constants[0][2];
+                    sy = 0.5f - 0.5f * vy * invZ * constants[0][3];
+                }
+                drawMarker(sx, sy, inFront, r, g, b);
+            };
+
+            projectAndDraw(probe.sunCandidateValid, probe.sunToLightWorld, .25f, 1.f, .35f);
+            projectAndDraw(probe.moonCandidateValid, probe.moonToLightWorld, .25f, 1.f, 1.f);
+
+            if (++celestialProbeLogCounter >= 60) {
+                celestialProbeLogCounter = 0;
+                char msg[512];
+                if (!probe.addressesReadable) {
+                    sprintf_s(msg, "celestial-probe: addresses not readable (module layout may not match)");
+                } else if (!probe.valuesPlausible) {
+                    sprintf_s(msg, "celestial-probe: read ok but neither candidate direction was plausible; day=%.4f", probe.day);
+                } else {
+                    sprintf_s(msg,
+                        "celestial-probe: day=%.4f sunRaw=(%.2f %.2f %.2f) moonRaw=(%.2f %.2f %.2f) ref=(%.2f %.2f %.2f) "
+                        "sunToLight=(%.3f %.3f %.3f) valid=%d moonToLight=(%.3f %.3f %.3f) valid=%d legacy_v24_screen=(%.3f %.3f)",
+                        probe.day,
+                        probe.sunRaw.x, probe.sunRaw.y, probe.sunRaw.z,
+                        probe.moonRaw.x, probe.moonRaw.y, probe.moonRaw.z,
+                        probe.referenceRaw.x, probe.referenceRaw.y, probe.referenceRaw.z,
+                        probe.sunToLightWorld.x, probe.sunToLightWorld.y, probe.sunToLightWorld.z, probe.sunCandidateValid ? 1 : 0,
+                        probe.moonToLightWorld.x, probe.moonToLightWorld.y, probe.moonToLightWorld.z, probe.moonCandidateValid ? 1 : 0,
+                        constants[2][0], constants[2][1]);
+                }
+                std::ofstream(std::filesystem::path(celestialProbeLogPath), std::ios::app) << msg << '\n';
+            }
         }
     }
 

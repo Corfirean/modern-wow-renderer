@@ -20,6 +20,7 @@ bin/
 
 # Temporary tests, diagnostics and local analysis files
 WaterDiagnostics/
+CelestialDiagnostics/
 references/
 snapshots/
 *.py
@@ -29,6 +30,10 @@ snapshots/
 DiagnosticSmokeTest.*
 WaterDiagnostics.ini
 *Probe*
+# CelestialMemoryProbe is shipped source (compiled into the DLL via the
+# .vcxproj), not a throwaway local diagnostic script - keep it tracked.
+!src/Diagnostics/CelestialMemoryProbe.h
+!src/Diagnostics/CelestialMemoryProbe.cpp
 Test*.ini
 INSTALL-RU.txt
 WATER-*.md

@@ -50,8 +50,14 @@ namespace renderer
         info.hash = hash;
         info.bytecodeSize = size;
         info.isKnownUI = (hash == 0xd9e7756460af6296ull || hash == 0xc29c7060b723c0c6ull);
+        // 0x48a82796bd612aeb: a second water vertex shader, paired with the
+        // same known 0x7d4f078fa1876a09 pixel shader, that the client swaps
+        // to for water tiles very close to the camera (found via WaterDiag
+        // capture - it was missing from this list, so those close tiles
+        // fell through unclassified and rendered with none of our effects).
         info.isKnownWater = (hash == 0x17f042a7906ca126ull || hash == 0x7d4f078fa1876a09ull ||
-                             hash == 0x206d861fd0a721ddull || hash == 0xfdd9528ed3ac30eaull);
+                             hash == 0x206d861fd0a721ddull || hash == 0xfdd9528ed3ac30eaull ||
+                             hash == 0x48a82796bd612aebull);
 
         ++m_misses;
         auto [iter, inserted] = m_cache.emplace(key, info);

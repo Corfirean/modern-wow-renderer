@@ -35,10 +35,31 @@ namespace renderer
         float sunScreenX = -1.0f;
         float sunScreenY = -1.0f;
         float sunStrength = 0.0f;
+        // Confirmed CelestialTracker source used by the atmosphere path.
+        // celestialIsMoon is deliberately explicit: colour is never used to
+        // guess which body is active.
+        float celestialIntensity = 0.0f;
+        bool celestialIsMoon = false;
 
         // Projection reconstruction parameters [P22, P32, P00, P11]
         float projUnpack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         float depthMaxZ = 1.0f;
+
+        // Raw forward (world->view) transform, rows exactly as the game's
+        // vertex shader constants store them (row 3 = translation; same
+        // row-vector convention used throughout this codebase). CameraCapture
+        // swaps viewRaw into previousViewRaw before overwriting it with each
+        // new frame's value, so by the time this frame's rendering reads
+        // previousViewRaw it holds LAST frame's transform - used for ray/fog
+        // temporal reprojection: transforming this frame's reconstructed
+        // world position by previousViewRaw (+ the projection, which is
+        // assumed FOV-stable frame to frame) gives where that point
+        // appeared on screen last frame, so history is sampled at the
+        // correct motion-compensated UV instead of naively at the same UV.
+        Matrix4 viewRaw;
+        bool viewRawValid = false;
+        Matrix4 previousViewRaw;
+        bool previousViewValid = false;
 
         // Directional shadow map data
         Matrix4 shadowMatrix;
@@ -52,6 +73,17 @@ namespace renderer
         IDirect3DSurface9* depthSurface = nullptr;
         IDirect3DTexture9* sceneColor = nullptr;
         IDirect3DSurface9* sceneSurface = nullptr;
+        IDirect3DTexture9* atmosphereNoise = nullptr;
+        // Per-pixel "how much of this pixel is water" (0..1) and the water
+        // surface's own view-space depth, written by watereffect::Scope as
+        // extra render targets during the actual water draws this frame
+        // (see WaterEffect.h). The main depth buffer holds whatever is
+        // BEHIND water (water doesn't write it), so the atmosphere pass
+        // uses these to march air only down to the water SURFACE instead
+        // of through the water to the seabed - see
+        // DirectionalVolumetricLighting.cpp's boundary-depth pass.
+        IDirect3DTexture9* waterMaskTexture = nullptr;
+        IDirect3DTexture9* waterDepthTexture = nullptr;
 
         bool depthAvailable = false;
         bool cameraValid = false;
