@@ -3,15 +3,18 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "src/D3D9/ScopedRenderState.h"
@@ -336,14 +339,90 @@ inline bool FindReceiverRegisterLayout(uint64_t hash, UINT& startRegister, UINT&
 // (a different instruction pattern entirely) and is deliberately excluded
 // here rather than assumed to match - same "verify before touching"
 // approach as the softness registers.
-inline bool FindStrengthRegister(uint64_t hash, UINT& reg)
+inline bool IsStrengthConfirmedHash(uint64_t hash)
 {
     static constexpr uint64_t kConfirmed[] = {
         0x08b17d1abaad8eceull, 0x634793193e26059dull, 0x6e6f053c4b910cf4ull, 0xac726e53bca0ac1aull
     };
-    if (std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) == std::end(kConfirmed)) return false;
-    reg = 12u;
-    return true;
+    return std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) != std::end(kConfirmed);
+}
+
+// c12 turned out to be a `def`-declared shader literal (compiled into the
+// instruction stream), not a runtime constant - SetPixelShaderConstantF on
+// it is a silent no-op, confirmed live (0% difference across the slider
+// range). The only way to actually change it is to patch the compiled
+// bytecode's literal and use that as a replacement shader for the exact
+// same draws SoftnessScope already validates (same hash whitelist, same
+// cascade/colourWrite guards) - the same "swap the shader for one draw,
+// restore after" technique WaterEffect already uses, just building the
+// replacement once instead of writing HLSL by hand.
+//
+// D3D9 SM3 bytecode: a `def cN, x, y, z, w` instruction is the fixed byte
+// sequence [opcode+length][dest register token][4 raw floats]. Verified
+// byte-for-byte in the dumped .bin for all 4 confirmed hashes:
+//   0x05000051 (D3DSIO_DEF, length=5) 0xA00F000C (dest = c12, full mask)
+//   followed immediately by the four x/y/z/w float DWORDs.
+// Patching only rewrites those two floats in a private copy of the
+// bytecode; instruction count, opcodes and control flow are untouched.
+inline bool PatchDefC12(const std::vector<BYTE>& original, float x, float y, std::vector<DWORD>& patched)
+{
+    if (original.size() % 4 != 0 || original.size() < 24) return false;
+    patched.assign(original.size() / 4, 0);
+    std::memcpy(patched.data(), original.data(), original.size());
+    for (size_t i = 0; i + 24 <= original.size(); i += 4)
+    {
+        DWORD opcode, dest;
+        std::memcpy(&opcode, original.data() + i, 4);
+        std::memcpy(&dest, original.data() + i + 4, 4);
+        if (opcode != 0x05000051u || dest != 0xA00F000Cu) continue;
+        float floats[4];
+        std::memcpy(floats, original.data() + i + 8, 16);
+        if (std::abs(floats[0] - .3f) > 1e-4f || std::abs(floats[1] - .7f) > 1e-4f ||
+            floats[2] != 0.f || floats[3] != 0.f)
+            continue; // shape mismatch - do not touch an instruction we haven't verified
+        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + i + 8, &x, 4);
+        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + i + 12, &y, 4);
+        return true;
+    }
+    return false;
+}
+
+struct PatchedStrengthShader
+{
+    Microsoft::WRL::ComPtr<IDirect3DPixelShader9> shader;
+    float builtForScale = -1.f;
+};
+inline std::unordered_map<uint64_t, PatchedStrengthShader> patchedStrengthShaders;
+
+// Returns a shader identical to `original` except c12's literal scaled by
+// the current strengthScale, rebuilding only when the slider actually
+// changes. Returns null (leave the native shader bound) if the def
+// instruction wasn't found in the expected shape, or on any failure -
+// this must never be the reason a receiver draw doesn't render.
+inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint64_t hash, IDirect3DPixelShader9* original)
+{
+    auto& entry = patchedStrengthShaders[hash];
+    if (entry.shader && std::abs(entry.builtForScale - strengthScale) < .001f) return entry.shader.Get();
+
+    UINT size = 0;
+    if (!original || FAILED(original->GetFunction(nullptr, &size)) || !size || size > 65536) return nullptr;
+    std::vector<BYTE> bytecode(size);
+    if (FAILED(original->GetFunction(bytecode.data(), &size))) return nullptr;
+
+    const float darkening = std::clamp(.3f * strengthScale, 0.f, 1.f);
+    std::vector<DWORD> patched;
+    if (!PatchDefC12(bytecode, darkening, 1.f - darkening, patched)) return nullptr;
+
+    Microsoft::WRL::ComPtr<IDirect3DPixelShader9> created;
+    if (FAILED(d->CreatePixelShader(patched.data(), created.GetAddressOf()))) return nullptr;
+
+    entry.shader = created;
+    entry.builtForScale = strengthScale;
+    std::ostringstream s;
+    s << "[STRENGTH] built patched shader for psHash=0x" << std::hex << hash << std::dec
+      << " darkening 0.3 -> " << darkening << "\n";
+    Append(s.str());
+    return entry.shader.Get();
 }
 
 inline bool HasFourNativeCascades(int firstStage)
@@ -396,7 +475,7 @@ public:
     {
         if (!device) return;
         if (softnessActive) device->SetPixelShaderConstantF(softnessStart, softnessOriginal[0], softnessCount);
-        if (strengthActive) device->SetPixelShaderConstantF(strengthReg, strengthOriginal, 1);
+        if (strengthShaderSwapped) device->SetPixelShader(originalShaderForRestore.Get());
     }
 
     SoftnessScope(const SoftnessScope&) = delete;
@@ -470,31 +549,30 @@ private:
 
     void ApplyStrength(uint64_t psHash)
     {
-        UINT reg = 0;
-        if (!FindStrengthRegister(psHash, reg)) return;
-        float value[4]{};
-        if (FAILED(device->GetPixelShaderConstantF(reg, value, 1))) return;
-        // Verified shape: (darkeningAmount, 1-darkeningAmount, 0, 0), used
-        // as result = shadowVisibility*x + y right before the shadow term
-        // is applied. Re-derive y from the scaled x so the fully-lit case
-        // (visibility=1) still lands on 1.0 instead of drifting.
-        if (std::abs(value[0] + value[1] - 1.f) > .01f || value[2] != 0.f || value[3] != 0.f) return;
-        float adjusted[4] = { std::clamp(value[0] * strengthScale, 0.f, 1.f), 0, 0, 0 };
-        adjusted[1] = 1.f - adjusted[0];
-        if (SUCCEEDED(device->SetPixelShaderConstantF(reg, adjusted, 1)))
+        if (!IsStrengthConfirmedHash(psHash)) return;
+
+        IDirect3DPixelShader9* current = nullptr;
+        if (FAILED(device->GetPixelShader(&current)) || !current) return;
+
+        IDirect3DPixelShader9* patched = GetPatchedStrengthShader(device, psHash, current);
+        if (!patched) { current->Release(); return; }
+
+        if (SUCCEEDED(device->SetPixelShader(patched)))
         {
-            strengthReg = reg;
-            std::copy(std::begin(value), std::end(value), strengthOriginal);
-            strengthActive = true;
+            originalShaderForRestore.Attach(current);
+            strengthShaderSwapped = true;
             static bool loggedActive = false;
             if (!loggedActive)
             {
                 loggedActive = true;
                 std::ostringstream s;
-                s << "[STRENGTH] ACTIVE: c" << reg << " darkening " << value[0] << " -> " << adjusted[0]
-                  << " for psHash=0x" << std::hex << psHash << std::dec << "\n";
+                s << "[STRENGTH] ACTIVE: swapped patched shader for psHash=0x" << std::hex << psHash << std::dec << "\n";
                 Append(s.str());
             }
+        }
+        else
+        {
+            current->Release();
         }
     }
 
@@ -504,9 +582,8 @@ private:
     UINT softnessStart = 0;
     UINT softnessCount = 0;
     float softnessOriginal[8][4]{};
-    bool strengthActive = false;
-    UINT strengthReg = 0;
-    float strengthOriginal[4]{};
+    bool strengthShaderSwapped = false;
+    Microsoft::WRL::ComPtr<IDirect3DPixelShader9> originalShaderForRestore;
 };
 
 inline void LogConstantsBlock(IDirect3DDevice9* d, std::ostringstream& s)
