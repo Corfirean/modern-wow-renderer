@@ -1,0 +1,84 @@
+name: Build and release
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Release Win32
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build DLL
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'Visual Studio 2022 C++ build tools were not found.' }
+          & $msbuild ModernWoWRenderer.sln /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE." }
+
+      - name: Package renderer
+        shell: pwsh
+        run: |
+          $files = @('build/Release/d3d9.dll', 'build/Release/ModernWoWRenderer.ini', 'build/Release/GraphicsEffects.ini')
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing build output: $file" }
+          }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Compress-Archive -LiteralPath $files -DestinationPath dist/ModernWoWRenderer-Win32.zip
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ModernWoWRenderer-Win32
+          path: dist/ModernWoWRenderer-Win32.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish main build
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ModernWoWRenderer-Win32
+          path: dist
+
+      - name: Create release and upload package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="build-${BUILD_SHA}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --target "$BUILD_SHA" \
+              --title "Main build ${BUILD_SHA:0:12}" \
+              --notes "Automatic Release/Win32 build from commit $BUILD_SHA. Extract the ZIP and copy d3d9.dll, ModernWoWRenderer.ini, and GraphicsEffects.ini beside WoW.exe or Ascension.exe." \
+              --latest
+          fi
+          gh release upload "$tag" dist/ModernWoWRenderer-Win32.zip --clobber
