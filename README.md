@@ -58,6 +58,14 @@ The project includes two primary configuration files:
 
 ## Building
 
+### Automatic builds and releases
+
+GitHub Actions builds the Release/Win32 DLL on pushes and pull requests to `main`. Successful pushes to `main` (including merged pull requests) publish a GitHub Release tagged `build-<commit SHA>` with `ModernWoWRenderer-Win32.zip`. The ZIP contains `d3d9.dll`, `ModernWoWRenderer.ini`, and `GraphicsEffects.ini`, ready to extract into the game directory.
+
+Download the ZIP from the repository's **Releases** page. Branch and pull request builds provide the same ZIP under the workflow run's **Artifacts**, without publishing a release. Maintainers can also run **Build and release** manually from the **Actions** tab; selecting `main` publishes a release. Re-running a build for the same commit updates its existing release asset.
+
+The workflow uses Visual Studio 2022 on `windows-2022` and overrides the platform toolset to `v143`; the project's local toolset selection is preserved. No additional secrets are required: release publishing uses the built-in `GITHUB_TOKEN` with `contents: write` only in the release job.
+
 ### Requirements
 - **Visual Studio 2022+** (v143 or v145 toolset)
 - **C++20** standard support
