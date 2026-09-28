@@ -12,7 +12,11 @@
   <PropertyGroup><TargetName>d3d9</TargetName><OutDir>$(SolutionDir)build\$(Configuration)\</OutDir><IntDir>$(SolutionDir)build\obj\$(Configuration)\</IntDir></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp20</LanguageStandard><WarningLevel>Level4</WarningLevel><PreprocessorDefinitions>WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile><Link><AdditionalDependencies>d3d9.lib;%(AdditionalDependencies)</AdditionalDependencies><ModuleDefinitionFile>$(ProjectDir)d3d9.def</ModuleDefinitionFile></Link><PostBuildEvent><Command>copy /Y "$(ProjectDir)ModernWoWRenderer.ini" "$(OutDir)ModernWoWRenderer.ini"
 copy /Y "$(ProjectDir)GraphicsEffects.ini" "$(OutDir)GraphicsEffects.ini"
-copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"</Command></PostBuildEvent></ItemDefinitionGroup>
+copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"
+if not exist "$(OutDir)MaterialCache" mkdir "$(OutDir)MaterialCache"
+copy /Y "$(ProjectDir)MaterialCache\local_light_manifest.json" "$(OutDir)MaterialCache\local_light_manifest.json"
+copy /Y "$(ProjectDir)MaterialCache\LocalLightReview.json" "$(OutDir)MaterialCache\LocalLightReview.json"
+if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDir)textures"</Command></PostBuildEvent></ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ModernWoWRenderer.cpp" />
     <ClCompile Include="src\Core\FrameContext.cpp" />
@@ -25,9 +29,15 @@ copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"</Command></PostB
     <ClCompile Include="src\Effects\DirectionalVolumetricLighting.cpp" />
     <ClCompile Include="src\Diagnostics\CelestialMemoryProbe.cpp" />
     <ClCompile Include="src\D3D9\CelestialTracker.cpp" />
+    <ClCompile Include="src\Materials\MaterialCacheManager.cpp" />
+    <ClCompile Include="src\Lighting\LocalLightManager.cpp" />
+    <ClCompile Include="src\Effects\LocalLightingRenderer.cpp" />
     <ClInclude Include="src\Core\MathTypes.h" />
     <ClInclude Include="src\Core\FrameContext.h" />
     <ClInclude Include="src\Core\ShaderCache.h" />
+    <ClInclude Include="src\Materials\MaterialCacheManager.h" />
+    <ClInclude Include="src\Materials\TextureHashLookup.h" />
+    <ClInclude Include="src\Materials\WicTextureLoader.h" />
     <ClInclude Include="src\Scene\MaterialType.h" />
     <ClInclude Include="src\Scene\DrawCallContext.h" />
     <ClInclude Include="src\Scene\DrawCallClassifier.h" />
@@ -37,6 +47,8 @@ copy /Y "$(ProjectDir)INSTALL-RU.txt" "$(OutDir)INSTALL-RU.txt"</Command></PostB
     <ClInclude Include="src\D3D9\CameraCapture.h" />
     <ClInclude Include="src\D3D9\ScopedRenderState.h" />
     <ClInclude Include="src\Effects\DirectionalVolumetricLighting.h" />
+    <ClInclude Include="src\Effects\LocalLightingRenderer.h" />
+    <ClInclude Include="src\Lighting\LocalLightManager.h" />
     <ClInclude Include="src\Diagnostics\CelestialMemoryProbe.h" />
     <ClInclude Include="src\Diagnostics\CelestialDrawDiagnostics.h" />
     <ClInclude Include="src\D3D9\CelestialTracker.h" />

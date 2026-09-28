@@ -16,13 +16,21 @@ inline std::wstring logPath;
 inline void Configure(const std::wstring& base){logPath=base+L"WaterReflection.log";}
 inline void ClearInput(){watereffect::reflectionScene=nullptr;watereffect::reflectionDepth=nullptr;memset(watereffect::reflectionData,0,sizeof(watereffect::reflectionData));}
 
-inline bool IsWater(IDirect3DDevice9* /*d*/){
- uint64_t psHash = renderer::g_trackedState.psHash;
- uint64_t vsHash = renderer::g_trackedState.vsHash;
- // 0x48a82796bd612aeb: extra near-camera water vertex shader, same pixel
- // shader as usual - see DrawCallClassifier.cpp for how this was found.
- return (psHash==0x17f042a7906ca126ull||psHash==0x7d4f078fa1876a09ull)&&
-        (vsHash==0x206d861fd0a721ddull||vsHash==0xfdd9528ed3ac30eaull||vsHash==0x48a82796bd612aebull);
+inline bool IsWater(IDirect3DDevice9* d){
+ // This must use exactly the same material identity as watereffect::Scope.
+ // A shader whitelist here caused the pre-water scene copy to happen only
+ // after an unlisted liquid tile had already rendered. The copy consequently
+ // contained part of the water surface itself and later tiles sampled a
+ // different SSR/refraction input, producing large geometric seams whose
+ // position changed with draw order/camera angle.
+ if(!d)return false;
+ ComPtr<IDirect3DBaseTexture9> tex0,tex1;
+ if(FAILED(d->GetTexture(0,tex0.GetAddressOf()))||!tex0||tex0->GetType()!=D3DRTYPE_TEXTURE||
+    FAILED(d->GetTexture(1,tex1.GetAddressOf()))||!tex1||tex1->GetType()!=D3DRTYPE_TEXTURE)return false;
+ D3DSURFACE_DESC d0{},d1{};
+ if(FAILED(static_cast<IDirect3DTexture9*>(tex0.Get())->GetLevelDesc(0,&d0))||
+    FAILED(static_cast<IDirect3DTexture9*>(tex1.Get())->GetLevelDesc(0,&d1)))return false;
+ return d0.Width==8&&d0.Height==64&&d1.Width==512&&d1.Height==512;
 }
 
 inline void Expose(){

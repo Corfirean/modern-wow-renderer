@@ -27,6 +27,15 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Atmosphere",L"DensityPermille","FOG DENSITY",0,20,1,5},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereMaxDistance","FOG DISTANCE",200,1200,20,520},
  {KIND_SLIDER,L"Atmosphere",L"AtmosphereWashPercent","FOG WASH",0,100,2,55},
+ // Separate near-ground world-space volume integrated by the atmosphere
+ // raymarch. Movement opens a soft wake which gradually fills back in.
+ {KIND_HEADER,nullptr,nullptr,"--- LOCAL VOLUMETRIC FOG ---",0,0,0,0},
+ {KIND_TOGGLE,L"LocalFog",L"Enabled","LOCAL FOG",0,1,1,1},
+ {KIND_SLIDER,L"LocalFog",L"DensityPermille","LOCAL DENSITY",0,100,2,12},
+ {KIND_SLIDER,L"LocalFog",L"HeightUnits","LOCAL HEIGHT",1,8,1,3},
+ {KIND_SLIDER,L"LocalFog",L"WakeStrengthPercent","PLAYER WAKE",0,150,5,85},
+ {KIND_SLIDER,L"LocalFog",L"WakeRadius","WAKE RADIUS",2,14,1,5},
+ {KIND_SLIDER,L"LocalFog",L"TrailLength","WAKE TRAIL",4,40,2,18},
  // Rescales the GAME's OWN native distance fog (its real per-shader fog
  // constants, the same ones vanilla WoW uses to hide its own render/
  // streaming distance edge) - independent of the atmosphere controls
@@ -35,6 +44,12 @@ inline std::vector<Item> items={
  {KIND_TOGGLE,L"DistanceFog",L"Enabled","WORLD EDGE FOG",0,1,1,1},
  {KIND_SLIDER,L"DistanceFog",L"DistancePercent","EDGE FOG DISTANCE",10,300,5,130},
  {KIND_SLIDER,L"DistanceFog",L"PowerPercent","EDGE FOG POWER",10,300,5,30},
+
+ // === WEATHER VISUALS ===
+ {KIND_HEADER,nullptr,nullptr,"--- WEATHER VISUALS ---",0,0,0,0},
+ {KIND_TOGGLE,L"WeatherVisuals",L"Enabled","WEATHER SYSTEM",0,1,1,1},
+ {KIND_SLIDER,L"WeatherVisuals",L"Mode","WEATHER HINT (0=AUTO 1=RAIN 2=SNOW)",0,2,1,0},
+ {KIND_SLIDER,L"WeatherVisuals",L"IntensityPercent","WEATHER STRENGTH",25,200,5,100},
 
  // === WATER & REFLECTIONS ===
  {KIND_HEADER,nullptr,nullptr,"--- WATER & REFLECTIONS ---",0,0,0,0},
@@ -52,6 +67,14 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"Water",L"ShoreFoamPercent","FOAM AMOUNT",0,60,1,28},
  {KIND_SLIDER,L"Water",L"SpecularPercent","WATER SHINE",0,400,5,115},
 
+ // === LOCAL LIGHTING ===
+ {KIND_HEADER,nullptr,nullptr,"--- LOCAL LIGHTING ---",0,0,0,0},
+ {KIND_TOGGLE,L"DynamicLighting",L"Enabled","DYNAMIC LIGHTS",0,1,1,1},
+ {KIND_SLIDER,L"DynamicLighting",L"IntensityPercent","LIGHT INTENSITY",0,250,5,100},
+ {KIND_SLIDER,L"DynamicLighting",L"RayPercent","LIGHT RAYS",0,200,5,75},
+ {KIND_SLIDER,L"DynamicLighting",L"Quality","LIGHT QUALITY (0 LOW 1 BAL 2 HIGH)",0,2,1,1},
+ {KIND_SLIDER,L"DynamicLighting",L"DebugMode","LIGHT DEBUG",0,4,1,0},
+
  // === DYNAMIC SHADOWS ===
  {KIND_HEADER,nullptr,nullptr,"--- DYNAMIC SHADOWS ---",0,0,0,0},
  {KIND_TOGGLE,L"NativeShadows",L"Enabled","NATIVE SHADOWS",0,1,1,1},
@@ -62,6 +85,13 @@ inline std::vector<Item> items={
  // c12 floats changed, everything else byte-identical) for the 4 confirmed
  // receiver hashes, restoring the original shader after the draw.
  {KIND_SLIDER,L"NativeShadows",L"StrengthPercent","SHADOW STRENGTH",30,250,10,100},
+
+ // === AI MATERIALS & RELIEF ===
+ {KIND_HEADER,nullptr,nullptr,"--- AI MATERIALS & RELIEF ---",0,0,0,0},
+ {KIND_TOGGLE,L"AIMaterials",L"Enabled","AI MATERIALS",0,1,1,1},
+ {KIND_SLIDER,L"AIMaterials",L"NormalStrengthPercent","NORMAL BUMP",0,200,5,90},
+ {KIND_SLIDER,L"AIMaterials",L"ParallaxDepthPercent","PARALLAX DEPTH",0,100,2,35},
+ {KIND_SLIDER,L"AIMaterials",L"SelfShadowStrength","SELF SHADOWS",0,150,5,90},
 
  // === IMAGE & COLOR ===
  {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},

@@ -1,5 +1,6 @@
 #include "DrawCallClassifier.h"
 #include <cmath>
+#include <wrl/client.h>
 
 namespace renderer
 {
@@ -65,15 +66,35 @@ namespace renderer
         }
 
         // 2. Water Check
-        // 0x48a82796bd612aeb: extra vertex shader the client swaps to for
-        // water tiles very close to the camera, same pixel shader as usual -
-        // without it those tiles fell through unclassified (WaterDiag capture).
+        // Shader hashes are only a fast path. The client uses additional
+        // shader variants for the same liquid under bridges, at tile seams,
+        // near the camera and in expansion zones. Identify the material by
+        // the same distinctive two-texture layout used by WaterEffect so the
+        // classifier, SSR capture and replacement shader cannot disagree.
         bool waterShaderPair =
             (ctx.psHash == 0x17f042a7906ca126ull || ctx.psHash == 0x7d4f078fa1876a09ull) &&
             (ctx.vsHash == 0x206d861fd0a721ddull || ctx.vsHash == 0xfdd9528ed3ac30eaull ||
-             ctx.vsHash == 0x48a82796bd612aebull);
+             ctx.vsHash == 0x48a82796bd612aebull || ctx.vsHash == 0x70faf83955e2b668ull);
 
-        if (waterShaderPair)
+        bool waterTextureLayout = false;
+        if (device)
+        {
+            using Microsoft::WRL::ComPtr;
+            ComPtr<IDirect3DBaseTexture9> tex0, tex1;
+            if (SUCCEEDED(device->GetTexture(0, tex0.GetAddressOf())) && tex0 && tex0->GetType() == D3DRTYPE_TEXTURE &&
+                SUCCEEDED(device->GetTexture(1, tex1.GetAddressOf())) && tex1 && tex1->GetType() == D3DRTYPE_TEXTURE)
+            {
+                D3DSURFACE_DESC d0{}, d1{};
+                if (SUCCEEDED(static_cast<IDirect3DTexture9*>(tex0.Get())->GetLevelDesc(0, &d0)) &&
+                    SUCCEEDED(static_cast<IDirect3DTexture9*>(tex1.Get())->GetLevelDesc(0, &d1)))
+                {
+                    waterTextureLayout = d0.Width == 8 && d0.Height == 64 &&
+                                         d1.Width == 512 && d1.Height == 512;
+                }
+            }
+        }
+
+        if (waterShaderPair || waterTextureLayout)
         {
             dc.material = MaterialType::Water;
             dc.isWater = true;

@@ -18,6 +18,7 @@
 #include "src/Effects/EnvironmentFogCapture.h"
 #include "VolumeIntegration.h"
 #include "WaterReflection.h"
+#include "WeatherVisuals.h"
 #include "TuningOverlay.h"
 #include "src/Core/ShaderCache.h"
 #include "src/Core/FrameContext.h"
@@ -28,6 +29,10 @@
 #include "src/D3D9/CelestialTracker.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "NativeShadowDiagnostics.h"
+#include "src/Materials/MaterialCacheManager.h"
+#include "src/Lighting/LocalLightManager.h"
+#include "src/Effects/LocalLightingRenderer.h"
+#include "src/Effects/GroundSurfaceCapture.h"
 
 namespace
 {
@@ -40,12 +45,16 @@ using DrawFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,UINT);
 using DrawIndexedFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,INT,UINT,UINT,UINT,UINT);
 using DrawUPFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,const void*,UINT);
 using DrawIndexedUPFn = HRESULT (WINAPI*)(IDirect3DDevice9*,D3DPRIMITIVETYPE,UINT,UINT,UINT,const void*,D3DFORMAT,const void*,UINT);
+using SetLightFn = HRESULT (WINAPI*)(IDirect3DDevice9*,DWORD,const D3DLIGHT9*);
+using LightEnableFn = HRESULT (WINAPI*)(IDirect3DDevice9*,DWORD,BOOL);
 PresentFn originalPresent=nullptr;
 ResetFn originalReset=nullptr;
 DrawFn originalDraw=nullptr;
 DrawIndexedFn originalDrawIndexed=nullptr;
 DrawUPFn originalDrawUP=nullptr;
 DrawIndexedUPFn originalDrawIndexedUP=nullptr;
+SetLightFn originalSetLight=nullptr;
+LightEnableFn originalLightEnable=nullptr;
 using ClearFn=HRESULT(WINAPI*)(IDirect3DDevice9*,DWORD,const D3DRECT*,DWORD,D3DCOLOR,float,DWORD);
 ClearFn originalClear=nullptr;
 bool unified=false,graphicsActive=true,graphicsKeyDown=false,graphicsShowStatus=false,tuningKeyDown=false;
@@ -120,8 +129,6 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device);
 
 HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 {
-    if (!unified && (GetAsyncKeyState(VK_F10) & 1))
-        g_settings.enabled = !g_settings.enabled;
     DrawAtmosphere(device);
     g_drawingOverlay=true;
     if(unified){if(graphicsShowStatus){watereffect::DrawStatus(device,graphicsActive?"FX ON":"FX OFF",0);
@@ -129,8 +136,10 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
     }
     else {watereffect::DrawStatus(device);
     if(distancefog::enabled&&distancefog::showStatus)watereffect::DrawStatus(device,!distancefog::active?"HAZE OFF":distancefog::matches?"HAZE ON":"HAZE WAIT",1);}
+    if(weathervisuals::enabled&&weathervisuals::showStatus)watereffect::DrawStatus(device,weathervisuals::GetStatusText(),3);
     nativeshadowdiag::DrawPreview(device);
     tuningoverlay::Draw(device);
+    renderer::MaterialCacheManager::Instance().DrawDebugOverlay(device);
     g_drawingOverlay=false;
     return g_originalEndScene(device);
 }
@@ -138,18 +147,20 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
     waterreflection::Present();
     volume::Present(d);
-    if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();Log("F7 overlay changed GraphicsEffects.ini");}
+    renderer::MaterialCacheManager::Instance().Present(d);
+    weathervisuals::Present(d);
+    if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("F7 overlay changed GraphicsEffects.ini");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
-            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=graphicsActive;
+            graphicsActive=!graphicsActive;watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;
             Log(graphicsActive?"F11 graphics ON":"F11 graphics OFF");
         }
         graphicsKeyDown=down;
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();Log("F12 reloaded GraphicsEffects.ini");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("F12 reloaded GraphicsEffects.ini");}
         tuningKeyDown=down;
     }
     waterhighlight::Present();
@@ -168,6 +179,10 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
     waterdiag::Reset(d);
     celestialdiag::Reset(d);
     nativeshadowdiag::Reset();
+    renderer::MaterialCacheManager::Instance().Reset(d);
+    renderer::LocalLightingRenderer::Instance().Reset(d);
+    renderer::LocalLightManager::Instance().Reset();
+    weathervisuals::Reset(d);
     renderer::ShaderCache::Instance().Clear();
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DepthCapture::Instance().Reset(d);
@@ -182,7 +197,7 @@ HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
 HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
     const bool waterNeedsDepth=watereffect::enabled&&watereffect::active&&watereffect::effectEnabled&&
         (watereffect::reflectionsEnabled||watereffect::refractionEnabled||watereffect::depthEnabled||watereffect::foamEnabled);
-    if(g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
+    if(volume::internal||g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
         return originalClear(d,n,rect,flags,color,z,stencil);
     renderer::RendererDiagnostics::Instance().OnFrameBegin();
     volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
@@ -203,10 +218,29 @@ SetFVFFn originalSetFVF = nullptr;
 SetVertexShaderFn originalSetVertexShader = nullptr;
 SetPixelShaderFn originalSetPixelShader = nullptr;
 
+HRESULT WINAPI HookedSetLight(IDirect3DDevice9* d, DWORD index, const D3DLIGHT9* light)
+{
+    const HRESULT hr = originalSetLight(d, index, light);
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
+        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+        renderer::LocalLightManager::Instance().OnSetLight(index, light);
+    return hr;
+}
+
+HRESULT WINAPI HookedLightEnable(IDirect3DDevice9* d, DWORD index, BOOL enabled)
+{
+    const HRESULT hr = originalLightEnable(d, index, enabled);
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
+        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+        renderer::LocalLightManager::Instance().OnLightEnable(index, enabled);
+    return hr;
+}
+
 HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3DSurface9* surface)
 {
     const HRESULT hr = originalSetRenderTarget(d, index, surface);
-    if (SUCCEEDED(hr) && !volume::internal && !g_drawingOverlay)
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
+        !renderer::MaterialCacheManager::Instance().IsInternalPass())
         nativeshadowdiag::OnSetRenderTarget(index, surface);
     return hr;
 }
@@ -214,8 +248,12 @@ HRESULT WINAPI HookedSetRenderTarget(IDirect3DDevice9* d, DWORD index, IDirect3D
 HRESULT WINAPI HookedSetTexture(IDirect3DDevice9* d, DWORD stage, IDirect3DBaseTexture9* texture)
 {
     const HRESULT hr = originalSetTexture(d, stage, texture);
-    if (SUCCEEDED(hr) && !volume::internal && !g_drawingOverlay)
+    if (SUCCEEDED(hr) && !volume::internal && !weathervisuals::internal && !g_drawingOverlay &&
+        !renderer::MaterialCacheManager::Instance().IsInternalPass())
+    {
         nativeshadowdiag::OnSetTexture(stage, texture);
+        renderer::MaterialCacheManager::Instance().OnSetTexture(stage, texture);
+    }
     return hr;
 }
 
@@ -231,7 +269,8 @@ HRESULT WINAPI HookedSetVertexShader(IDirect3DDevice9* d, IDirect3DVertexShader9
 
 HRESULT WINAPI HookedSetPixelShader(IDirect3DDevice9* d, IDirect3DPixelShader9* ps)
 {
-    if (renderer::g_trackedState.currentPS != ps || (ps && renderer::g_trackedState.psHash == 0))
+    if (!weathervisuals::internal &&
+        (renderer::g_trackedState.currentPS != ps || (ps && renderer::g_trackedState.psHash == 0)))
     {
         renderer::g_trackedState.currentPS = ps;
         renderer::g_trackedState.psHash = (ps && (!unified || graphicsActive)) ? renderer::ShaderCache::Instance().GetShaderHash(ps) : 0;
@@ -288,7 +327,7 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
     if(volume::internal)return originalDraw(d,t,start,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
-    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
+    if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
@@ -298,12 +337,15 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitive",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
+    if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,start,n,false);
+    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDraw(d,t,start,n);});volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
+    weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDraw(d,t,start,n);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
@@ -312,7 +354,7 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
     if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
-    if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
+    if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
@@ -322,13 +364,25 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitive",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
+    if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,base,start,n);
+    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
+    weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(SUCCEEDED(hr)&&!g_drawingOverlay&&renderer::MaterialCacheManager::Instance().IsActive()){
+        auto dc=ClassifyCurrentDraw(d,t,n);
+        if(dc.material==renderer::MaterialType::Terrain){
+            renderer::MaterialCacheManager::Instance().ApplyNormalModulation(d,t,base,min,vertices,start,n,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+        }
+        else if(dc.material==renderer::MaterialType::WMO||dc.material==renderer::MaterialType::M2){
+            renderer::MaterialCacheManager::Instance().ApplyObjectMaterial(d,n,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
+        }
+    }
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
 }
@@ -346,12 +400,16 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
+    if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,false,v,stride);
+    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawUP(d,t,n,v,stride);});volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
+    weathervisuals::ObserveWorldDraw();
+    weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
@@ -370,12 +428,16 @@ HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT m
     if(!g_drawingOverlay)waterdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(!g_drawingOverlay)celestialdiag::Draw(d,"DrawIndexedPrimitiveUP",t,n);
     if(!g_drawingOverlay)renderer::CelestialTracker::Instance().Observe(d,n);
+    if(!g_drawingOverlay)renderer::LocalLightManager::Instance().ObserveTorchDraw(d,t,0,0,n,true,v,stride,indices,f,min+vertices);
+    if(n>0&&!g_drawingOverlay&&volume::ready&&!volume::composed){volume::internal=true;renderer::GroundSurfaceCapture::Instance().Observe(d,renderer::FrameContext::Current(),[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});volume::internal=false;}
     waterhighlight::Scope tint(d,g_drawingOverlay);
     celestialhighlight::Scope chl(d,n,g_drawingOverlay);
     if(!g_drawingOverlay)renderer::EnvironmentFogCapture::Instance().Observe(d);
     distancefog::Scope fog(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     watereffect::Scope water(d,g_drawingOverlay||(waterhighlight::enabled&&waterhighlight::visible));
     nativeshadowdiag::SoftnessScope nativeShadow(d,renderer::g_trackedState.psHash,renderer::g_trackedState.currentPS);
+    weathervisuals::ObserveWorldDraw();
+    weathervisuals::NativeParticleScope weatherParticle(g_drawingOverlay?nullptr:d,n);
     HRESULT hr=originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)celestialdiag::AfterDraw(d);
     return hr;
@@ -389,6 +451,8 @@ void RestoreDeviceHooksAfterReset(IDirect3DDevice9* device)
     if(!VirtualProtect(&table[16],95*sizeof(void*),PAGE_READWRITE,&oldProtect))return;
 
     InterlockedExchangePointer(&table[42],reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[51],reinterpret_cast<void*>(HookedSetLight));
+    InterlockedExchangePointer(&table[53],reinterpret_cast<void*>(HookedLightEnable));
     InterlockedExchangePointer(&table[37],reinterpret_cast<void*>(HookedSetRenderTarget));
     InterlockedExchangePointer(&table[57],reinterpret_cast<void*>(HookedSetRenderState));
     InterlockedExchangePointer(&table[65],reinterpret_cast<void*>(HookedSetTexture));
@@ -443,8 +507,12 @@ void HookDevice(IDirect3DDevice9* device)
     originalSetFVF=reinterpret_cast<SetFVFFn>(table[89]);
     originalSetVertexShader=reinterpret_cast<SetVertexShaderFn>(table[92]);
     originalSetPixelShader=reinterpret_cast<SetPixelShaderFn>(table[107]);
+    originalSetLight=reinterpret_cast<SetLightFn>(table[51]);
+    originalLightEnable=reinterpret_cast<LightEnableFn>(table[53]);
 
     InterlockedExchangePointer(&table[42], reinterpret_cast<void*>(HookedEndScene));
+    InterlockedExchangePointer(&table[51], reinterpret_cast<void*>(HookedSetLight));
+    InterlockedExchangePointer(&table[53], reinterpret_cast<void*>(HookedLightEnable));
     InterlockedExchangePointer(&table[37], reinterpret_cast<void*>(HookedSetRenderTarget));
     InterlockedExchangePointer(&table[57], reinterpret_cast<void*>(HookedSetRenderState));
     InterlockedExchangePointer(&table[65], reinterpret_cast<void*>(HookedSetTexture));
@@ -542,15 +610,19 @@ void Initialize()
     watereffect::Configure(g_basePath);
     distancefog::Configure(g_basePath);
     volume::Configure(g_basePath);
+    weathervisuals::Configure(g_basePath);
     waterreflection::Configure(g_basePath);
     tuningoverlay::Configure(g_basePath);
     nativeshadowdiag::Configure(g_basePath);
+    renderer::MaterialCacheManager::Instance().Configure(g_basePath);
+    renderer::LocalLightManager::Instance().Configure(g_basePath);
+    renderer::LocalLightingRenderer::Instance().Configure(g_basePath);
     renderer::RendererDiagnostics::Instance().SetLogPath(g_basePath + L"ModernWoWRenderer.log");
     unified=GetPrivateProfileIntW(L"Graphics",L"UnifiedToggle",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
     if(unified){watereffect::hotkey=false;distancefog::hotkey=false;g_settings.enabled=false;
         graphicsShowStatus=GetPrivateProfileIntW(L"Graphics",L"ShowStatus",0,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
         graphicsActive=GetPrivateProfileIntW(L"Graphics",L"Enabled",1,(g_basePath+L"ModernWoWRenderer.ini").c_str())!=0;
-        watereffect::active=distancefog::active=volume::active=graphicsActive;
+        watereffect::active=distancefog::active=volume::active=weathervisuals::active=graphicsActive;
     }
     Log("Modern WoW Renderer proxy loaded.");
     // Device vtable entries remain hooked for the process lifetime.

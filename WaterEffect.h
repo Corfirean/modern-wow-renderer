@@ -3,6 +3,8 @@
 #include <cstdio>
 #include "src/D3D9/TrackedRenderState.h"
 #include "src/D3D9/CelestialTracker.h"
+#include "src/Lighting/LocalLightManager.h"
+#include "src/Core/FrameContext.h"
 namespace watereffect {
 using Microsoft::WRL::ComPtr;
 bool enabled=false, active=true, keyDown=false, hotkey=true;
@@ -62,6 +64,9 @@ Output main(float4 pos:POSITION,float3 normal:NORMAL,float4 color:COLOR0,float2 
 }
 )HLSL";
 const char* source=R"HLSL(
+float4 localPosition[8]:register(c180); // view-space emitters
+float4 localColor[8]:register(c188);
+float4 localControl:register(c196); // count, enabled
 sampler2D baseTexture:register(s0);
 sampler2D surfaceTexture:register(s1);
 sampler2D sceneTexture:register(s2);
@@ -190,14 +195,38 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     float3 l=safeNormalize(-lightDirection.xyz);
     float ndh=saturate(dot(wave,safeNormalize(l+v)));
     float ndl=saturate(dot(wave,l));
-    float broad=pow(ndh,14);
-    float sparkle=pow(ndh,112);
+    // Keep the coherent reflection narrow. The previous low exponent made
+    // calm canal water turn into one white blanket.
+    float broad=pow(ndh,42);
+    float sparkle=pow(ndh,176);
     float glitterVariation=.28+1.45*pow(saturate(a.x*.52+b.x*.31+swell.x*.17),3);
     float foreverFresnel=pow(1-saturate(dot(wave,v)),2);
     float fresnel=saturate(.08+foreverStyle.z*(.10+.62*foreverFresnel));
-    float pathBreakup=.22+1.35*smoothstep(.42,.88,a.x*.46+b.x*.34+swell.x*.20);
-    float celestialPath=pow(ndh,9)*pathBreakup*foreverStyle.y*(.45+1.15*fresnel)*ndl;
-    float spec=(.22*broad+sparkle*glitterVariation)*foreverStyle.y*(.65+fresnel)*ndl+celestialPath*.38;
+    float pathBreakup=.08+1.10*smoothstep(.48,.90,a.x*.46+b.x*.34+swell.x*.20);
+    float celestialPath=pow(ndh,38)*pathBreakup*foreverStyle.y*(.28+.72*fresnel)*ndl;
+
+    // March from this water point toward the sun/moon through the captured
+    // pre-water depth buffer. Buildings and terrain suppress direct glint,
+    // while ambient sky reflection remains visible under cover.
+    float lightVisibility=1.0;
+    if(reflectionStyle.w>.5 && celestialPath>.00005) {
+        [unroll] for(int lightStep=0;lightStep<8;++lightStep) {
+            float q=(lightStep+1)/8.0;
+            float traceDistance=1.5+q*q*110.0;
+            float3 lightSample=viewPos+wave*.18+l*traceDistance;
+            float2 lightUV=float2(.5+.5*lightSample.x*reflectionProjection.z/max(lightSample.z,.05),
+                                  .5-.5*lightSample.y*reflectionProjection.w/max(lightSample.z,.05));
+            float inside=step(0,lightUV.x)*step(lightUV.x,1)*step(0,lightUV.y)*step(lightUV.y,1)*step(.05,lightSample.z);
+            float lightRaw=tex2Dlod(sceneDepth,float4(lightUV,0,0)).r;
+            float blockerZ=lightRaw>=.9999?100000:reflectionProjection.y/(lightRaw/max(reflectionControl.w,.001)-reflectionProjection.x);
+            float delta=lightSample.z-blockerZ;
+            float thickness=2.0+traceDistance*.10;
+            float blocked=inside*step(blockerZ,99999)*step(.12,delta)*step(delta,thickness);
+            lightVisibility*=1.0-blocked;
+        }
+    }
+    celestialPath*=lightVisibility;
+    float spec=(.12*broad+sparkle*glitterVariation)*foreverStyle.y*(.55+fresnel)*ndl+celestialPath*.24;
     float shading=1+controls.z*.6*(dot(wave,l)-dot(n,l));
     float energy=max(spec*controls.w,0);
     energy=.68*energy/(.42+energy);
@@ -251,20 +280,29 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     reflectionAmount=max(reflectionAmount, absorption*(.15+.35*foreverFresnel)*saturate(reflectionStyle.x*.55+reflectionControl.x*edge));
     rgb=lerp(waterBody,reflected,reflectionAmount);
 
+    // Direct reflection of actual local emitters on the same wave normal.
+    // This does not depend on SSR finding an opaque flame in scene depth.
+    float3 localReflection=0;
+    [loop]for(int li=0;li<8;++li){
+        if(li>=(int)localControl.x)break;
+        float3 delta=localPosition[li].xyz-viewPos;
+        float distance=length(delta);float3 toLight=delta/max(distance,.001);
+        float reach=saturate(1-distance/max(localPosition[li].w,.01));
+        float specular=pow(saturate(dot(wave,safeNormalize(toLight+v))),64);
+        float fresnelLocal=.04+.96*pow(1-saturate(dot(wave,v)),5);
+        localReflection+=localColor[li].rgb*localColor[li].w*specular*fresnelLocal*
+            saturate(dot(wave,toLight))*reach*reach/(1+distance*distance*.035);
+    }
+    rgb+=localReflection*localControl.y;
+
     // 4. Celestial reflection path & shore/crest foam
-    float pathEnergy=saturate(celestialPath*controls.w*.85);
+    float pathEnergy=saturate(celestialPath*controls.w*.62);
     rgb+=max(sheenColor,float3(.20,.22,.24))*pathEnergy;
-    // Broad, warm, roughly circular glow where a CALM mirror (the flat
-    // surface normal `n`, not the wave-perturbed `wave`) would bounce the
-    // sun/moon straight at the camera. The sparkle above is high-frequency
-    // wave-facet glitter - correct, but it reads as scattered texture, not
-    // the coherent warm disc from the reference shots. This is that disc:
-    // same idea as the sparkle (mirror reflection of the light direction)
-    // but evaluated on the smooth normal so it doesn't break up into noise.
+    // Tiny core at the centre of the sun road, not a broad circular blanket.
     float haloAlign=saturate(dot(reflect(-v,n),l));
-    float halo=pow(haloAlign,22)*foreverStyle.y*ndl;
+    float halo=pow(haloAlign,112)*foreverStyle.y*ndl*lightVisibility;
     float3 warmTint=lerp(max(lightColor.rgb,.15),float3(1,.78,.5),.35);
-    rgb+=warmTint*halo*1.6;
+    rgb+=warmTint*halo*.24;
     float waveFoam=smoothstep(.70,.91,a.x*.42+b.x*.30+swell.x*.28+length(longSlopes)*.10);
     float foamAmount=(shore+waveFoam*foreverStyle.w)*crest*waterStyle.z;
     rgb+=float3(.42,.48,.43)*foamAmount;
@@ -362,24 +400,25 @@ struct Scope {
     ComPtr<IDirect3DPixelShader9> original,replacement;
     ComPtr<IDirect3DVertexShader9> originalVertex,replacementVertex;
     IDirect3DDevice9* device=nullptr;
-    float old[36]{},oldVertexControls[4]{};
+    float old[36]{},oldVertexControls[4]{},oldLocalLights[68]{};bool localLightsSaved=false;
     ComPtr<IDirect3DBaseTexture9> oldExtraTextures[2];
     DWORD oldSampler[2][6]{};bool extraState=false;
     ComPtr<IDirect3DSurface9> oldMaskRT;bool maskBound=false;
     ComPtr<IDirect3DSurface9> oldDepthRT;bool depthBound=false;
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
         if(skip||!enabled||!active||!effectEnabled)return;
-        // Fast early exit: only water shaders need the rest of this expensive setup
-        uint64_t psHash = renderer::g_trackedState.psHash;
-        uint64_t vsHash = renderer::g_trackedState.vsHash;
-        // 0x48a82796bd612aeb: extra near-camera water vertex shader (same
-        // pixel shader, same 8x64/512x512 texture layout below - confirmed
-        // via WaterDiag capture, it was just missing from this list).
-        if ((psHash!=0x17f042a7906ca126ull && psHash!=0x7d4f078fa1876a09ull) ||
-            (vsHash!=0x206d861fd0a721ddull && vsHash!=0xfdd9528ed3ac30eaull && vsHash!=0x48a82796bd612aebull))
-            return;
         try {
-            // Check texture layout: slot 0 is 8x64 ripple LUT, slot 1 is 512x512 wave normal
+            // Shader hashes are not a material identity in this client.  The
+            // very same liquid surface switches VS/PS variants at tile seams,
+            // under bridges, near the camera and after spell interaction.  A
+            // newly observed variant (VS 70faf83955e2b668) used the exact same
+            // input ABI and textures but was rejected by the old VS whitelist,
+            // producing the large triangular holes seen in canals/coasts.
+            //
+            // This two-texture layout is the stable material signature: slot 0
+            // is WoW's 8x64 liquid ripple LUT and slot 1 its 512x512 surface
+            // normal.  Requiring both slots excludes the unrelated 8x64 weather
+            // particles while accepting every shader variant of this water.
             for(unsigned slot=0;slot<2;++slot) {
                 ComPtr<IDirect3DBaseTexture9> tex;
                 if(FAILED(d->GetTexture(slot,tex.GetAddressOf()))||!tex||tex->GetType()!=D3DRTYPE_TEXTURE)return;
@@ -392,6 +431,8 @@ struct Scope {
             originalVertex = renderer::g_trackedState.currentVS;
             if(!original || !originalVertex)return;
             if(FAILED(d->GetPixelShaderConstantF(200,old,9)))return;
+            if(FAILED(d->GetPixelShaderConstantF(180,oldLocalLights,17)))return;
+            localLightsSaved=true;
             if(FAILED(d->GetVertexShaderConstantF(200,oldVertexControls,1)))return;
             float controls[36]={float(GetTickCount64()%600000)*.001f,strength,normalStrength,specularStrength};
             if(FAILED(d->GetVertexShaderConstantF(33,controls+4,1))||FAILED(d->GetVertexShaderConstantF(35,controls+8,1)))return;
@@ -450,13 +491,27 @@ struct Scope {
                 if(SUCCEEDED(d->SetRenderTarget(2,waterDepthSurface))) depthBound=true;
             }
             static bool reported=false;
-            if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched water PS + texture layout; replacement active\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
+            if(!reported){std::ofstream log(std::filesystem::path(logPath),std::ios::app);log<<"matched structural water texture layout; replacement active (shader variants accepted)\n";log<<"direction="<<controls[4]<<','<<controls[5]<<','<<controls[6]<<" color="<<controls[8]<<','<<controls[9]<<','<<controls[10]<<" specular="<<specularStrength<<'\n';reported=true;}
             static bool reflectionReported=false;if(extraState&&!reflectionReported){std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"SSR scene+depth input active strength="<<reflectionStrength<<" environment="<<environmentStrength<<'\n';reflectionReported=true;}
             if(FAILED(d->SetVertexShader(replacementVertex.Get()))||FAILED(d->SetPixelShaderConstantF(200,controls,9))||FAILED(d->SetVertexShaderConstantF(200,vertexControls,1))){Restore();return;}
+            {
+                float lights[17][4]{};
+                const auto& frame=renderer::FrameContext::Current();
+                const auto& manager=renderer::LocalLightManager::Instance();
+                if(reflectionsEnabled&&manager.Enabled()&&frame.cameraValid&&frame.viewRawValid){
+                    const auto& selected=manager.Selected();unsigned count=std::min<unsigned>(8,unsigned(selected.size()));
+                    for(unsigned i=0;i<count;++i){const auto& light=selected[i];const auto& m=frame.viewRaw.m;
+                        for(int axis=0;axis<3;++axis)lights[i][axis]=light.position.x*m[0][axis]+light.position.y*m[1][axis]+light.position.z*m[2][axis]+m[3][axis];
+                        lights[i][3]=light.radius;lights[8+i][0]=light.color.x;lights[8+i][1]=light.color.y;lights[8+i][2]=light.color.z;lights[8+i][3]=light.intensity*manager.IntensityScale();
+                    }
+                    lights[16][0]=float(count);lights[16][1]=reflectionStrength;
+                }
+                d->SetPixelShaderConstantF(180,lights[0],17);
+            }
             ++frameMatches;
         }catch(...){Restore();}
     }
-    void Restore() noexcept {if(device){device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}if(maskBound){device->SetRenderTarget(1,oldMaskRT.Get());maskBound=false;}if(depthBound){device->SetRenderTarget(2,oldDepthRT.Get());depthBound=false;}device=nullptr;}}
+    void Restore() noexcept {if(device){if(localLightsSaved){device->SetPixelShaderConstantF(180,oldLocalLights,17);localLightsSaved=false;}device->SetPixelShader(original.Get());device->SetVertexShader(originalVertex.Get());device->SetPixelShaderConstantF(200,old,9);device->SetVertexShaderConstantF(200,oldVertexControls,1);if(extraState){const D3DSAMPLERSTATETYPE states[]={D3DSAMP_MINFILTER,D3DSAMP_MAGFILTER,D3DSAMP_MIPFILTER,D3DSAMP_ADDRESSU,D3DSAMP_ADDRESSV,D3DSAMP_SRGBTEXTURE};for(unsigned slot=0;slot<2;++slot){device->SetTexture(2+slot,oldExtraTextures[slot].Get());for(unsigned state=0;state<6;++state)device->SetSamplerState(2+slot,states[state],oldSampler[slot][state]);}}if(maskBound){device->SetRenderTarget(1,oldMaskRT.Get());maskBound=false;}if(depthBound){device->SetRenderTarget(2,oldDepthRT.Get());depthBound=false;}device=nullptr;}}
     ~Scope(){Restore();}
     Scope(const Scope&)=delete;
     Scope& operator=(const Scope&)=delete;

@@ -1,6 +1,7 @@
 #pragma once
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
+#include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/D3D9/TrackedRenderState.h"
 namespace distancefog {
 bool enabled=false,active=true,keyDown=false,showStatus=true,hotkey=true,effectEnabled=true;
@@ -21,12 +22,15 @@ void Present() {
     if(!enabled)return;
     bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;
     GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-    if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()){active=!active;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
+    if(hotkey&&down&&!keyDown&&pid==GetCurrentProcessId()){active=!active;renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled=active&&effectEnabled;std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"active="<<active<<'\n';}
     keyDown=down;matches=0;
 }
 struct Scope {
     IDirect3DDevice9* device=nullptr;UINT reg=0;float original[4]{};
     explicit Scope(IDirect3DDevice9* d,bool skip=false) noexcept {
+        // The depth compositor now owns the same edge controls for every world
+        // shader, including families absent from the legacy hash table.
+        if(renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled&&renderer::DirectionalVolumetricLighting::Instance().Settings().enabled)return;
         if(skip||!enabled||!active||!effectEnabled)return;
         try {
             uint64_t hash = renderer::g_trackedState.vsHash;
