@@ -23,14 +23,14 @@ namespace renderer
             // Shaders & Vertex format
             m_device->GetVertexShader(m_vs.GetAddressOf());
             m_device->GetPixelShader(m_ps.GetAddressOf());
-            m_device->GetPixelShaderConstantF(0, m_psConstants[0], 16);
+            m_device->GetPixelShaderConstantF(0, m_psConstants[0], 64);
             m_device->GetFVF(&m_fvf);
             m_device->GetVertexDeclaration(m_vdecl.GetAddressOf());
             m_device->GetStreamSource(0, m_stream0.GetAddressOf(), &m_streamOffset, &m_streamStride);
             m_device->GetIndices(m_indices.GetAddressOf());
 
-            // Textures & Samplers for stages 0..3
-            for (DWORD s = 0; s < 4; ++s)
+            // Atmosphere's terrain-relative density field also uses stage 5.
+            for (DWORD s = 0; s < 6; ++s)
             {
                 m_device->GetTexture(s, m_tex[s].GetAddressOf());
                 m_device->GetSamplerState(s, D3DSAMP_MINFILTER, &m_samp[s].minFilter);
@@ -97,7 +97,7 @@ namespace renderer
             m_device->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, m_slopeBias);
 
             // Restore Textures & Samplers
-            for (DWORD s = 0; s < 4; ++s)
+            for (DWORD s = 0; s < 6; ++s)
             {
                 m_device->SetTexture(s, m_tex[s].Get());
                 m_device->SetSamplerState(s, D3DSAMP_MINFILTER, m_samp[s].minFilter);
@@ -111,7 +111,7 @@ namespace renderer
             // Restore Shaders & Vertex format
             m_device->SetVertexShader(m_vs.Get());
             m_device->SetPixelShader(m_ps.Get());
-            m_device->SetPixelShaderConstantF(0, m_psConstants[0], 16);
+            m_device->SetPixelShaderConstantF(0, m_psConstants[0], 64);
             if (m_vdecl)
                 m_device->SetVertexDeclaration(m_vdecl.Get());
             if (m_fvf != 0)
@@ -138,7 +138,9 @@ namespace renderer
 
         ComPtr<IDirect3DVertexShader9> m_vs;
         ComPtr<IDirect3DPixelShader9> m_ps;
-        float m_psConstants[16][4]{};
+        // Local lighting uses c0..c31; atmosphere also uses registers above
+        // c15. Restore them before the next native world/UI draw.
+        float m_psConstants[64][4]{};
         DWORD m_fvf = 0;
         ComPtr<IDirect3DVertexDeclaration9> m_vdecl;
         ComPtr<IDirect3DVertexBuffer9> m_stream0;
@@ -146,7 +148,7 @@ namespace renderer
         UINT m_streamStride = 0;
         ComPtr<IDirect3DIndexBuffer9> m_indices;
 
-        ComPtr<IDirect3DBaseTexture9> m_tex[4];
+        ComPtr<IDirect3DBaseTexture9> m_tex[6];
         struct SamplerStateBackup
         {
             DWORD minFilter = D3DTEXF_POINT;
@@ -155,7 +157,7 @@ namespace renderer
             DWORD addressU = D3DTADDRESS_CLAMP;
             DWORD addressV = D3DTADDRESS_CLAMP;
             DWORD srgb = FALSE;
-        } m_samp[4];
+        } m_samp[6];
 
         DWORD m_zEnable = FALSE, m_zWrite = FALSE, m_zFunc = D3DCMP_LESSEQUAL;
         DWORD m_alphaBlend = FALSE, m_srcBlend = D3DBLEND_ONE, m_destBlend = D3DBLEND_ZERO, m_blendOp = D3DBLENDOP_ADD;

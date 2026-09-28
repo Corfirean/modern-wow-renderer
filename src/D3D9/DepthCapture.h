@@ -26,7 +26,8 @@ namespace renderer
         HRESULT RawGetDepth(IDirect3DDevice9* device, IDirect3DSurface9** outSurface);
 
         // Capture lifecycle hooks
-        void BeforeClear(IDirect3DDevice9* device, DWORD count, DWORD flags, float z);
+        // True only when this clear starts a new capture, not for later clears.
+        bool BeforeClear(IDirect3DDevice9* device, DWORD count, const D3DRECT* rects, DWORD flags, float z);
         void OnFrameEnd(IDirect3DDevice9* device);
         void Reset(IDirect3DDevice9* device);
 

@@ -41,3 +41,8 @@ DISTANCE-FOG.md
 GRAPHICS-TUNING.md
 VOLUME-INTEGRATION.md
 VOLUMETRIC-PROTOTYPE.md
+
+# Generated asset caches
+MaterialCache/entries/
+MaterialCache/preview/
+!MaterialCache/*.json

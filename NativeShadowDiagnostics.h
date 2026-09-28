@@ -342,7 +342,23 @@ inline bool FindReceiverRegisterLayout(uint64_t hash, UINT& startRegister, UINT&
 inline bool IsStrengthConfirmedHash(uint64_t hash)
 {
     static constexpr uint64_t kConfirmed[] = {
-        0x08b17d1abaad8eceull, 0x634793193e26059dull, 0x6e6f053c4b910cf4ull, 0xac726e53bca0ac1aull
+        // Family B: visibility * c12.x + c12.y.
+        0x08b17d1abaad8eceull, 0x634793193e26059dull, 0x6e6f053c4b910cf4ull, 0xac726e53bca0ac1aull,
+        // Family A: visibility * c8.y + c8.z. Verified from the live
+        // 3.3.5 extShadowQuality=5 receiver dumps (terrain/WMO variants).
+        0x06b49731d6b3d33eull, 0x42c3a115d145164aull, 0x6ef54f064e5141ddull,
+        0x827c05c3635b689full, 0xb52eba6fbc7f34f2ull, 0xca8fa34d6b69a7baull,
+        0xdd40e9d5fc1ef426ull, 0xf71ca77414ce780eull
+    };
+    return std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) != std::end(kConfirmed);
+}
+
+inline bool IsFamilyAStrengthHash(uint64_t hash)
+{
+    static constexpr uint64_t kConfirmed[] = {
+        0x06b49731d6b3d33eull, 0x42c3a115d145164aull, 0x6ef54f064e5141ddull,
+        0x827c05c3635b689full, 0xb52eba6fbc7f34f2ull, 0xca8fa34d6b69a7baull,
+        0xdd40e9d5fc1ef426ull, 0xf71ca77414ce780eull
     };
     return std::find(std::begin(kConfirmed), std::end(kConfirmed), hash) != std::end(kConfirmed);
 }
@@ -364,24 +380,34 @@ inline bool IsStrengthConfirmedHash(uint64_t hash)
 //   followed immediately by the four x/y/z/w float DWORDs.
 // Patching only rewrites those two floats in a private copy of the
 // bytecode; instruction count, opcodes and control flow are untouched.
-inline bool PatchDefC12(const std::vector<BYTE>& original, float x, float y, std::vector<DWORD>& patched)
+inline bool PatchStrengthLiteral(const std::vector<BYTE>& original, uint64_t hash,
+                                 float darkening, float floor, std::vector<DWORD>& patched)
 {
     if (original.size() % 4 != 0 || original.size() < 24) return false;
     patched.assign(original.size() / 4, 0);
     std::memcpy(patched.data(), original.data(), original.size());
+    const bool familyA = IsFamilyAStrengthHash(hash);
+    const DWORD expectedDest = familyA ? 0xA00F0008u : 0xA00F000Cu; // c8 or c12
     for (size_t i = 0; i + 24 <= original.size(); i += 4)
     {
         DWORD opcode, dest;
         std::memcpy(&opcode, original.data() + i, 4);
         std::memcpy(&dest, original.data() + i + 4, 4);
-        if (opcode != 0x05000051u || dest != 0xA00F000Cu) continue;
+        if (opcode != 0x05000051u || dest != expectedDest) continue;
         float floats[4];
         std::memcpy(floats, original.data() + i + 8, 16);
-        if (std::abs(floats[0] - .3f) > 1e-4f || std::abs(floats[1] - .7f) > 1e-4f ||
-            floats[2] != 0.f || floats[3] != 0.f)
-            continue; // shape mismatch - do not touch an instruction we haven't verified
-        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + i + 8, &x, 4);
-        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + i + 12, &y, 4);
+        const bool shapeMatches = familyA
+            ? (std::abs(floats[0] - 1.2f) <= 1e-4f &&
+               std::abs(floats[1] - .3f) <= 1e-4f &&
+               std::abs(floats[2] - .7f) <= 1e-4f)
+            : (std::abs(floats[0] - .3f) <= 1e-4f &&
+               std::abs(floats[1] - .7f) <= 1e-4f &&
+               floats[2] == 0.f && floats[3] == 0.f);
+        if (!shapeMatches) continue; // do not touch an unverified literal shape
+        const size_t darkeningOffset = i + (familyA ? 12 : 8);
+        const size_t floorOffset = i + (familyA ? 16 : 12);
+        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + darkeningOffset, &darkening, 4);
+        std::memcpy(reinterpret_cast<BYTE*>(patched.data()) + floorOffset, &floor, 4);
         return true;
     }
     return false;
@@ -411,7 +437,7 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
 
     const float darkening = std::clamp(.3f * strengthScale, 0.f, 1.f);
     std::vector<DWORD> patched;
-    if (!PatchDefC12(bytecode, darkening, 1.f - darkening, patched)) return nullptr;
+    if (!PatchStrengthLiteral(bytecode, hash, darkening, 1.f - darkening, patched)) return nullptr;
 
     Microsoft::WRL::ComPtr<IDirect3DPixelShader9> created;
     if (FAILED(d->CreatePixelShader(patched.data(), created.GetAddressOf()))) return nullptr;
@@ -425,15 +451,24 @@ inline IDirect3DPixelShader9* GetPatchedStrengthShader(IDirect3DDevice9* d, uint
     return entry.shader.Get();
 }
 
-inline bool HasFourNativeCascades(int firstStage)
+inline bool HasFourNativeCascades(IDirect3DDevice9* device, int firstStage)
 {
+    if (!device) return false;
     for (int i = 0; i < 4; ++i)
     {
-        IDirect3DTexture9* texture = previewTextureByStage[firstStage + i];
-        TargetRecord* target = FindTarget(texture);
-        if (!texture || !target || !target->depthTarget || target->width != 2048 || target->height != 2048 ||
-            target->format != D3DFMT_D24X8)
+        IDirect3DBaseTexture9* baseTexture = nullptr;
+        if (FAILED(device->GetTexture(firstStage + i, &baseTexture)) || !baseTexture)
             return false;
+        bool valid = false;
+        if (baseTexture->GetType() == D3DRTYPE_TEXTURE)
+        {
+            IDirect3DTexture9* texture = static_cast<IDirect3DTexture9*>(baseTexture);
+            D3DSURFACE_DESC desc{};
+            valid = SUCCEEDED(texture->GetLevelDesc(0, &desc)) &&
+                desc.Width == 2048 && desc.Height == 2048 && desc.Format == D3DFMT_D24X8;
+        }
+        baseTexture->Release();
+        if (!valid) return false;
     }
     return true;
 }
@@ -456,13 +491,14 @@ public:
         }
         if (actualShader) actualShader->Release();
 
-        firstStage = HasFourNativeCascades(4) ? 4 : (HasFourNativeCascades(5) ? 5 : -1);
-        static bool loggedNoCascades = false;
-        if (firstStage < 0)
-        {
-            if (!loggedNoCascades) { loggedNoCascades = true; Append("[SOFTNESS] no 4-cascade texture set bound on this draw (psHash checked against stage 4 and 5)\n"); }
-            return;
-        }
+        // The exact receiver hashes below were verified from dumped shader
+        // bytecode. Requiring GetLevelDesc to report four D24X8 textures was
+        // not portable across D3D9 wrappers: this client exposes its native
+        // cascade resources with a driver-specific depth FourCC, so valid
+        // receivers were rejected before either slider could run. The shader
+        // whitelist is the authoritative safety gate; the stage probe is now
+        // diagnostic only.
+        firstStage = HasFourNativeCascades(device, 4) ? 4 : (HasFourNativeCascades(device, 5) ? 5 : -1);
 
         DWORD colorWrite = 0;
         if (FAILED(device->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite)) || colorWrite == 0) return;
@@ -541,7 +577,8 @@ private:
                 loggedActive = true;
                 std::ostringstream s;
                 s << "[SOFTNESS] ACTIVE: scaled registers c" << startRegister << ".." << (startRegister + registerCount - 1)
-                  << " by " << softnessScale << "x for psHash=0x" << std::hex << psHash << std::dec << " at stage " << firstStage << "\n";
+                  << " by " << softnessScale << "x for psHash=0x" << std::hex << psHash << std::dec
+                  << " cascadeStage=" << firstStage << "\n";
                 Append(s.str());
             }
         }

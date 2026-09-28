@@ -13,6 +13,8 @@
 #include "src/D3D9/ScopedRenderState.h"
 #include "src/Scene/DrawCallClassifier.h"
 #include "src/Effects/DirectionalVolumetricLighting.h"
+#include "src/Effects/GroundSurfaceCapture.h"
+#include "src/Effects/LocalLightingRenderer.h"
 #include "src/Diagnostics/CelestialMemoryProbe.h"
 #include "src/D3D9/CelestialTracker.h"
 
@@ -345,6 +347,7 @@ void Reset(IDirect3DDevice9* d) {
     renderer::ShaderCache::Instance().Clear();
     renderer::DrawCallClassifier::Instance().ClearCache();
     renderer::DirectionalVolumetricLighting::Instance().Reset(d);
+    renderer::GroundSurfaceCapture::Instance().Reset();
     renderer::PerformanceProfiler::Instance().Reset(d);
     resources.shadowDepthSurface.Reset(); resources.shadowColorSurface.Reset();
     resources.shadowDepth.Reset(); resources.shadowColor.Reset();
@@ -370,7 +373,8 @@ HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** out) {
 
 inline bool HasActiveEffects() {
     bool hasContact = (!shaftDebug && shadowsEffectEnabled && contactShadowStrength > 0);
-    bool hasFog = (!shaftDebug && fogEffectEnabled);
+    bool hasFog = (!shaftDebug && (fogEffectEnabled ||
+        (renderer::DirectionalVolumetricLighting::Instance().Settings().localFogEnabled || renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled)));
     bool hasVolumetric = shaftsEffectEnabled && renderer::DirectionalVolumetricLighting::Instance().Settings().enabled;
     bool hasGlare = (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug));
     bool hasPost = postProcessEffectEnabled &&
@@ -378,10 +382,11 @@ inline bool HasActiveEffects() {
     return hasContact || hasFog || hasVolumetric || hasGlare || hasPost;
 }
 
-void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
+void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
     if (!enabled || !active || internal) return;
+    if (!renderer::DepthCapture::Instance().BeforeClear(d, count, rects, flags, z)) return;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
-    renderer::DepthCapture::Instance().BeforeClear(d, count, flags, z);
+    renderer::RendererDiagnostics::Instance().OnFrameBegin();
     depth = renderer::DepthCapture::Instance().GetDepthTexture();
     surface = renderer::DepthCapture::Instance().GetDepthSurface();
     originalDepth = renderer::DepthCapture::Instance().GetOriginalDepth();
@@ -499,6 +504,7 @@ bool CaptureCamera(IDirect3DDevice9* d) {
     bool ok = renderer::CameraCapture::Instance().Capture(
         d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
     if (ok) {
+        renderer::RendererDiagnostics::Instance().RecordCameraCapture();
         celestialDaylight = frameCtx.daylightFactor;
         celestialMoonlight = frameCtx.moonlightFactor;
         celestialShadowLight = frameCtx.shadowLightFactor;
@@ -747,8 +753,17 @@ bool Composite(IDirect3DDevice9* d) {
         // sitting correctly on the sun with no rays was exactly that bug.
         // Visibility from the actual draw call is the ground truth now;
         // it doesn't need a second, weaker opinion to also say yes.
-        bool useSun = sun.visible;
-        bool useMoon = !useSun && moon.visible;
+        auto& frameCtx = renderer::FrameContext::Current();
+        // Both discs can be rendered in the same frame.  "Sun wins whenever
+        // visible" consequently kept the radial pass attached to the bright
+        // sun candidate even in a moon-lit sky, producing an oversized halo
+        // while the actual moon had no shafts. CameraCapture already supplies
+        // the authoritative day/night blend: prefer the tracked moon when
+        // moonlight dominates and the sun when daylight dominates. There is
+        // still exactly one directional source, matching the scene lighting.
+        const bool nightDominant = frameCtx.moonlightFactor > frameCtx.daylightFactor;
+        bool useMoon = moon.visible && (nightDominant || !sun.visible);
+        bool useSun = sun.visible && !useMoon;
         const renderer::CelestialBody* body = useSun ? &sun : (useMoon ? &moon : nullptr);
         if (body) {
             constants[2][0] = body->screenX;
@@ -769,7 +784,6 @@ bool Composite(IDirect3DDevice9* d) {
         // else reading these (currently only the debug-only, off-by-default
         // DirectionalVolumetricLighting path) can't disagree with it by
         // still carrying the old v[24]-derived value.
-        auto& frameCtx = renderer::FrameContext::Current();
         if (body) {
             frameCtx.sunScreenX = body->screenX;
             frameCtx.sunScreenY = body->screenY;
@@ -915,10 +929,21 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetPixelShaderConstantF(0, constants[0], 14));
     }
 
+    // Local environment lights are accumulated before atmosphere so their
+    // surface contribution is scattered by the same medium and never lands
+    // on UI. Water is explicitly masked by LocalLightingRenderer.
+    const bool localLightingRendered =
+        renderer::LocalLightingRenderer::Instance().Render(d, frameCtx);
     // Dedicated low-resolution atmosphere. This replaces the old full-res
     // analytic fog/wash and owns haze, height fog, mist and celestial scatter.
-    if (!shaftDebug && fogEffectEnabled)
-        renderer::DirectionalVolumetricLighting::Instance().Render(d, renderer::FrameContext::Current(), target.Get());
+    bool atmosphereRendered = false;
+    if (!shaftDebug && (fogEffectEnabled ||
+        (renderer::DirectionalVolumetricLighting::Instance().Settings().localFogEnabled || renderer::DirectionalVolumetricLighting::Instance().Settings().edgeFogEnabled)))
+        atmosphereRendered = renderer::DirectionalVolumetricLighting::Instance().Render(
+            d, renderer::FrameContext::Current(), target.Get(), fogEffectEnabled);
+    if (localLightingRendered && !atmosphereRendered)
+        check(d->StretchRect(renderer::LocalLightingRenderer::Instance().GetLitSurface(), nullptr,
+                             target.Get(), nullptr, D3DTEXF_NONE));
 
     // Secondary Sun Radial Glare pass
     if (sunGlareEnabled && shaftsEffectEnabled && (constants[2][2] > 0.001f || shaftDebug)) {
@@ -1290,6 +1315,7 @@ void BeforeDraw(IDirect3DDevice9* d) {
     composed = true;
     if (Composite(d)) {
         ++applied;
+        renderer::RendererDiagnostics::Instance().RecordComposite();
         if (applied == 1) Log("composited before captured UI shader; height fog + screen-space shafts");
     }
     else {
@@ -1301,7 +1327,10 @@ void BeforeDraw(IDirect3DDevice9* d) {
 void Present(IDirect3DDevice9* d) {
     if (enabled && active && !composed && ready) {
         composed = true;
-        Composite(d);
+        if (Composite(d)) {
+            ++applied;
+            renderer::RendererDiagnostics::Instance().RecordComposite();
+        }
     }
     renderer::PerformanceProfiler::Instance().OnFrameEnd(d);
     if (enabled && active && ++frames % 600 == 120) {

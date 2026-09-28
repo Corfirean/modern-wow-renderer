@@ -1,0 +1,6 @@
+// Verified FLAMELICKSMALL mip payloads and captured rigid M2 shader variants.
+constexpr uint64_t kTorchTextureHashes[] = {0x15833c23ea3feba4ull,0x36be0a49170d65baull,0x4d15795b43a12422ull,0x4f03a3725a03914full,0x6759cd27c2e6002dull,0x6f00e4960a25296aull,0x72206f578b351c36ull,0x8354521e60f27a8cull,0xbf5eaa830c4d0989ull,0xc4dcaf7558b65691ull,0xdd5138e56bb100f4ull,0xe97d5f966b7995fdull};
+constexpr uint64_t kRigidM2Shaders[] = {0x279ee550dad80fecull,0x2e3dc5694f4a01afull,0x3b6bae0f7f0b7431ull,0x3cbf3a807f15c09aull,0x3fc670fc0424affcull,0x58e63b7a6cbed9cdull,0x96d3fae7a05e6cc0ull,0x9c37da43e2730eefull,0xa686caa859441ff6ull,0xdd8f39e3388f7c82ull,0xf9570d89edbcf73full,0xfea6cbbc4c094ad8ull,0xff32338728131932ull};
+
+// Verified unskinned model/particle path: view position = c31..c33 * position.
+constexpr uint64_t kUnskinnedM2Shaders[] = {0x270a73c0f75f8e67ull,0x39cbe8d1f68bfbcaull,0x47ce17aed7d7436cull,0x56582ea8baa88409ull,0x5f2c6b3af8c6e543ull,0x98dfcf600c7a1270ull,0xe9d8ef5d029020d1ull,0xf6a1996937ab5dc7ull};

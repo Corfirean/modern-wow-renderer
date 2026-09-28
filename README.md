@@ -1,136 +1,214 @@
 # Modern WoW Renderer
 
-A lightweight, non-invasive **Direct3D 9 proxy (`d3d9.dll`)** designed to modernize graphics in **World of Warcraft 3.3.5** (Ascension / Wrath of the Lich King).
+Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern lighting, atmosphere, water, weather, and post-processing effects to the World of Warcraft client used by [Project Ascension](https://ascension.gg/).
 
-The renderer hooks the D3D9 device on creation without touching game files, network code, or client memory. It captures camera matrices and reconstructed hardware depth buffers (`INTZ`) to inject modern volumetric lighting, atmospheric fog, screen-space reflections, and post-processing passes immediately before the UI is rendered.
+> [!IMPORTANT]
+> This project is developed and tested for the **Ascension client**. It is **not tested with a stock World of Warcraft 3.3.5 client**. The renderer is under active development, so visual glitches, compatibility problems, crashes, and performance regressions may still occur.
 
----
+> [!WARNING]
+> **AI Materials are not implemented as a supported feature yet.** The repository contains experimental material-cache code and configuration placeholders, but they are incomplete, disabled by default, and should not be treated as part of the current release.
 
-## Features
+## Screenshots
 
-### 1. Volumetric Sun Shafts (God Rays)
-- **Celestial Source Tracking:** Computes the true screen-space position of the celestial sun and moon from view-space directional lighting vectors (`c24`).
-- **Depth-Aware Occlusion:** World geometry (terrain, buildings, trees, player characters) acts as real-time light blockers, casting crisp silhouette beams.
-- **Radial Scattering:** Transport blur radiating outward from the celestial source with configurable softness, falloff, and intensity.
-- **Atmospheric Alignment:** Automatically respects zone lighting colors and day/night transitions (warm daylight vs. cool moonlight).
+<table>
+  <tr>
+    <td><img src="Screenshots/WoWScrnShot_092826_215004.jpg" alt="Rain, fog and local lighting" /></td>
+    <td><img src="Screenshots/WoWScrnShot_092826_215807.jpg" alt="Volumetric fog around a lantern" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/WoWScrnShot_092826_220551.jpg" alt="Local fire lighting and fog" /></td>
+    <td><img src="Screenshots/WoWScrnShot_092826_222851.jpg" alt="Rain and volumetric lighting in a forest" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/WoWScrnShot_092626_222609.jpg" alt="Water and atmospheric lighting" /></td>
+    <td><img src="Screenshots/WoWScrnShot_092626_232041.jpg" alt="Water reflections at night" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/WoWScrnShot_092626_232124.jpg" alt="Water rendering and distant atmosphere" /></td>
+    <td><img src="Screenshots/WoWScrnShot_092626_232814.jpg" alt="Rain in Stormwind" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/WoWScrnShot_092726_000028.jpg" alt="Night reflections in Stormwind" /></td>
+    <td><img src="Screenshots/WoWScrnShot_092726_000456.jpg" alt="Coastal water and ship" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/WoWScrnShot_092726_000647.jpg" alt="Night sky and environment lighting" /></td>
+    <td><img src="Screenshots/WoWScrnShot_092726_000749.jpg" alt="Red environment lighting" /></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/photo_2026-09-28_22-34-17.jpg" alt="In-game F7 tuning menu" /></td>
+    <td></td>
+  </tr>
+</table>
 
-### 2. Atmospheric Height Fog
-- **Analytic Exponential Fog:** Height-dependent fog integral that avoids horizon discontinuities.
-- **Mie & Rayleigh Phase Scattering:** Realistic directional glow around the sun and forward scattering through fog.
-- **Atmospheric Noise Modulation:** Rolling procedural noise simulating wind and shifting fog density.
+## Current features
 
-### 3. Native Shadow Enhancement
-- **WoW's own cascaded shadow maps as source of truth:** rather than reconstructing shadows from screen-space depth, the renderer enhances the game's existing 4-cascade shadow maps in place — position and direction are never touched, only quality.
-- **Shadow Softness:** Scales the native PCF sample radius for softer, less aliased shadow edges.
-- **Shadow Strength:** Darkens shadows beyond the game's default floor by swapping in a byte-patched copy of the confirmed receiver shaders (only the darkening constant changed, everything else byte-identical) — a runtime constant write doesn't work here since that value is compiled into the shader.
-- Adjustable live via the `F7` menu (`NATIVE SHADOWS`, `SHADOW SOFTNESS`, `SHADOW STRENGTH`).
+### Atmosphere and volumetric lighting
 
-### 4. Modern Water Shader Overhaul
-- **Screen-Space Reflections (SSR):** Reflects world geometry and characters across water surfaces with adaptive step sizes.
-- **Dual Flow-Map Ripples:** Counter-rotating UV layers for natural surface perturbation.
-- **Depth Absorption & Shoreline Foam:** Shallow-water color grading and procedural foam where water meets ground geometry.
-- **Solar Glint & Fresnel:** High-frequency specular glint and angle-dependent reflection power.
+- Depth-aware sun and moon shafts use the client's scene depth and tracked celestial direction.
+- Height fog, aerial haze, ground mist, and animated terrain-relative local fog are integrated in world space.
+- Local fog follows terrain, continues to evolve while the player is standing still, and reacts to player movement with a configurable wake.
+- Temporal accumulation and edge-aware upsampling reduce noise without drawing over the interface.
 
-### 5. Post-Processing Pipeline
-- **Sharpness Filter:** Contrast-preserving Laplacian unsharp mask for crisp textures and geometry edges.
-- **Color Grading:** Real-time brightness, contrast, and gamma adjustments.
+### Dynamic environment lighting
 
-### 6. Live In-Game Tuning & Controls
-- **`F7`** — Opens the in-game grouped tuning overlay menu with interactive sliders.
-- **`F11`** — Master toggle to enable/disable all injected graphical enhancements.
-- **`F12`** — Hot-reloads `GraphicsEffects.ini` from disk instantly (no client restart required).
+- Trusted native point and spot lights can illuminate nearby world surfaces.
+- Strong local lights contribute to volumetric scattering in fog and mist.
+- Held torches and lanterns retain their light while the player briefly occludes the source from the camera.
+- Screen-space occlusion and depth-derived normals keep the effect attached to visible geometry.
 
----
+### Weather
 
-## Configuration Files
+- Native rain and snow receive replacement textures, intensity, speed, wind, and depth-occlusion controls.
+- A depth-aware continuity layer keeps precipitation visible while moving quickly on a mount.
+- Weather state survives short native-particle gaps caused by opening the F7 menu or returning from Alt+Tab.
+- Optional rain lens droplets and an atmosphere-haze response are available.
 
-The project includes two primary configuration files:
+### Water
 
-- **`ModernWoWRenderer.ini`** — Core proxy settings, master feature switches, depth format preferences, and diagnostic hooks.
-- **`GraphicsEffects.ini`** — Detailed real-time graphics parameters divided into:
-  - `[Atmosphere]` (Fog density, shaft strength, sun vertical scale, softness, falloff)
-  - `[Water]` (Wave speed, ripples, reflections, foam, absorption, glint)
-  - `[NativeShadows]` (Shadow enable, softness, strength — enhances the game's own cascaded shadow maps)
-  - `[PostProcess]` (Brightness, contrast, gamma, sharpness)
-  - `[DistanceFog]` (Legacy world distance fog adjustments)
+- Screen-space reflections and environment fallback reflections.
+- Refraction, depth absorption, shoreline foam, ripples, Fresnel response, and sun glint.
+- Texture-signature matching covers liquid shader variants without splitting a continuous water surface.
 
----
+### Native shadows and post-processing
 
-## Building
+- Softness and strength controls enhance the client-created cascaded shadow maps.
+- Optional brightness, contrast, gamma, and sharpness post-processing.
+- Native distance-fog controls remain available for compatibility with the client's own fog path.
 
-### Requirements
-- **Visual Studio 2022+** (v143 or v145 toolset)
-- **C++20** standard support
-- **Platform:** `Win32` (`x86` 32-bit)
+## Known limitations
 
-### Build Steps
-1. Open `ModernWoWRenderer.sln` in Visual Studio.
-2. Select **Release** configuration and **Win32** platform.
-3. Build the solution (`Ctrl + Shift + B`) or via command line:
-   ```cmd
-   msbuild ModernWoWRenderer.vcxproj /p:Configuration=Release /p:Platform=Win32
-   ```
-4. Output files will be generated in `build\Release\`:
-   - `d3d9.dll`
-   - `ModernWoWRenderer.ini`
+- AI Materials, generated normal maps, parallax relief, and material self-shadowing are still experimental and are not implemented as a supported release feature.
+- Native-shadow enhancement only works when the Ascension client creates its own shadow maps.
+- Dynamic lights and weather detection rely on observed Ascension render patterns; unusual zones, spells, addons, or future client updates can expose missed cases.
+- D3D9 device resets, Alt+Tab transitions, uncommon depth formats, and third-party overlays remain compatibility-sensitive even though the common paths are covered by regression tests.
+- This mod is in active development. Bugs are expected; include `ModernWoWRenderer.log`, the zone, and reproduction steps when reporting one.
 
----
+## Controls
+
+| Key | Action |
+| --- | --- |
+| `F7` | Open or close the grouped in-game tuning menu. |
+| `F9` | Capture one diagnostic frame when celestial diagnostics are enabled. |
+| `F10` | Toggle weather visuals. |
+| `F11` | Toggle all injected graphics effects. |
+| `F12` | Reload `GraphicsEffects.ini` without restarting the client. |
+
+`F8` is reserved for the unfinished AI Materials development path and is not a supported user control.
 
 ## Installation
 
-Place the following files directly into your WoW client directory (alongside `Ascension.exe` or `WoW.exe`):
+1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
+2. Extract its contents into the Ascension client directory, next to the game executable.
+3. Confirm that `d3d9.dll`, `ModernWoWRenderer.ini`, and `GraphicsEffects.ini` are in that directory. Keep the packaged `textures` and `MaterialCache` directories beside them.
+4. Start the client normally. Use `F7` to tune the effects and `F12` after editing `GraphicsEffects.ini` by hand.
+
+Example layout:
 
 ```text
-Game Directory/
+Ascension/
 ├── d3d9.dll
 ├── ModernWoWRenderer.ini
-└── GraphicsEffects.ini
+├── GraphicsEffects.ini
+├── MaterialCache/
+│   ├── local_light_manifest.json
+│   └── LocalLightReview.json
+└── textures/
+    └── weather/
 ```
 
-Launch the game normally. Press **`F7`** in-game to adjust settings or **`F11`** to toggle effects.
+Remove or rename `d3d9.dll` to disable the proxy completely.
 
----
+## Configuration
 
-## Repository Structure & Architecture
+`ModernWoWRenderer.ini` contains proxy-wide switches, depth-capture preferences, and diagnostic controls. Most users should leave it unchanged.
 
-The codebase has undergone a modular architectural refactoring to decouple Direct3D9 low-level hooks from high-level rendering effects, enabling future expansion to advanced techniques (Cascaded Shadow Maps, GTAO/HBAO, improved SSR, temporal effects, bloom, tonemapping, and potential D3D11/D3D12 backends):
+`GraphicsEffects.ini` contains the live visual settings:
+
+| Section | Purpose |
+| --- | --- |
+| `[Atmosphere]` | Volumetric quality, fog density, shafts, temporal filtering, and debug views. |
+| `[LocalFog]` | Terrain-relative fog height, density, flow, and player wake. |
+| `[DynamicLighting]` | Local-light intensity, volumetric contribution, quality, and debug modes. |
+| `[WeatherVisuals]` | Rain/snow intensity, speed, wind, occlusion, lens droplets, and haze. |
+| `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, and glint. |
+| `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
+| `[PostProcess]` | Brightness, contrast, gamma, and sharpness. |
+| `[DistanceFog]` | Scaling for the client's native distance fog. |
+| `[AIMaterials]` | Unfinished experimental placeholder; keep disabled. |
+
+The F7 overlay writes supported values back to `GraphicsEffects.ini`. Manual edits can be applied with `F12`.
+
+## Building locally
+
+Requirements:
+
+- Visual Studio 2026 with the MSVC C++ x86/x64 tools and `v145` platform toolset.
+- Windows SDK and MSBuild.
+- A 32-bit `Win32` build target. The Ascension client is a 32-bit D3D9 process.
+
+Build from a Visual Studio developer PowerShell:
+
+```powershell
+msbuild ModernWoWRenderer.sln /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v145
+```
+
+The installable output is written to `build\Release\`. The post-build step copies both INI files, the local-light manifests, and weather textures alongside `d3d9.dll`.
+
+## Continuous integration and releases
+
+`.github/workflows/build.yml` builds both Debug and Release configurations for every pull request targeting `main` and every push to `main`. It uses GitHub's `windows-2025-vs2026` image and verifies the DLL and both configuration files.
+
+Every successful push to `main` also creates a GitHub Release containing an install-ready ZIP with:
+
+- `d3d9.dll`
+- `ModernWoWRenderer.ini`
+- `GraphicsEffects.ini`
+- required `MaterialCache` manifests
+- packaged weather textures
+
+The Release build is also retained as a workflow artifact for 14 days.
+
+## Validation
+
+The repository includes focused regression and shader checks:
+
+```powershell
+tools\Test-Atmosphere.cmd
+powershell -ExecutionPolicy Bypass -File tools\ValidateShaders.ps1
+```
+
+The tests cover fog-field coverage and motion, weather continuity, held-light lifetime, depth-capture policies, and embedded shader compilation. Final visual verification still requires the Ascension client because these effects depend on its real draw order, shaders, textures, and device-reset behavior.
+
+## Project structure
 
 ```text
-ModernWoWRenderer/
-├── src/
-│   ├── Core/                  # Foundational math, frame context, and caching
-│   │   ├── MathTypes.h        # Vector2/3/4 and Matrix4 abstractions
-│   │   ├── FrameContext.h/.cpp # Frame-level view/projection, depth, and lighting state
-│   │   └── ShaderCache.h/.cpp # O(1) thread-safe FNV-1a shader hashing & pointer cache
-│   ├── D3D9/                  # Direct3D 9 low-level hardware capture & state
-│   │   ├── DepthCapture.h/.cpp # INTZ depth stencil buffer replacement & hook redirects
-│   │   └── CameraCapture.h/.cpp# WoW vertex constant (c0..c26) extraction & celestial tracking
-│   ├── Scene/                 # Scene analysis and draw-call classification
-│   │   ├── MaterialType.h     # Material classification flags (M2, WMO, Terrain, Water, UI)
-│   │   ├── DrawCallContext.h  # Draw-call pipeline state key & hashing
-│   │   └── DrawCallClassifier.h/.cpp # Fast cached draw-call classification
-│   ├── Diagnostics/           # Telemetry and diagnostics
-│   │   └── RendererDiagnostics.h/.cpp # Frame & draw metrics aggregated every 600 frames
-│   └── Effects/               # Modular post-processing and lighting passes
-│
-├── ModernWoWRenderer.cpp      # D3D9 proxy DLL exports & main hook dispatch
-├── VolumeIntegration.h        # Volumetric lighting & atmospheric pipeline
-├── VolumeEffects.h            # HLSL shaders (god rays, radial blur, height fog, contact shadows)
-├── NativeShadowDiagnostics.h  # Native cascaded shadow map enhancement (softness/strength)
-├── WaterEffect.h              # Water replacement shaders and vertex displacement
-├── WaterReflection.h          # Screen-space reflections (SSR)
-├── WaterHighlight.h           # Water specular glint
-├── DistanceFog.h              # Fog override hooks
-├── TuningOverlay.h            # In-game interactive F7 tuning overlay
-├── ModernWoWRenderer.ini      # Core proxy settings
-├── GraphicsEffects.ini        # Live graphical tuning parameters
-├── ModernWoWRenderer.sln      # Solution file
-├── ModernWoWRenderer.vcxproj  # Project file
-├── d3d9.def                   # Proxy export definitions
-├── .gitignore                 # Minimal git rules (no binaries or test dumps)
-└── README.md                  # Project documentation
+ModernWoWRenderer.cpp        D3D9 proxy exports, hook dispatch, and frame orchestration
+VolumeIntegration.h         Atmosphere and volumetric composition
+WeatherVisuals.h            Native precipitation and continuity rendering
+WaterEffect.h               Water replacement and shading
+NativeShadowDiagnostics.h   Native cascade discovery and enhancement
+TuningOverlay.h             F7 in-game settings interface
+src/Core/                   Shared frame state, math, and shader caches
+src/D3D9/                   Camera/depth capture and render-state guards
+src/Effects/                Volumetric and local-light render passes
+src/Lighting/               Trusted local-light collection and lifetime rules
+src/Scene/                  Draw-call classification
+src/Materials/              Experimental, unfinished AI Materials code
+src/Diagnostics/            Runtime logging, capture, and profiling
+tools/                      Offline regression and shader validation tools
+Screenshots/                README gallery source images
 ```
-  - Temporal Anti-Aliasing (TAA) / Motion Vectors
-- [ ] **Phase 5: Modern Backend Abstraction**
-  - Potential D3D11 / D3D12 render path via proxy translation
 
+The proxy loads the system Direct3D 9 runtime, forwards the normal API, observes Ascension's render state, and injects its passes before the user interface. It does not replace game data files or network behavior.
+
+## Reporting bugs
+
+Open a GitHub issue with:
+
+- the Ascension client build and zone;
+- the effect and settings involved;
+- exact reproduction steps, including whether Alt+Tab, F7, a mount, or a device reset is involved;
+- `ModernWoWRenderer.log` and a screenshot or short video when available.
+
+Reports from stock 3.3.5 clients are still useful, but that client is currently outside the tested compatibility target.

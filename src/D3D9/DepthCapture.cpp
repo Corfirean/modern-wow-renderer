@@ -1,4 +1,7 @@
 #include "DepthCapture.h"
+#include "DepthCapturePolicy.h"
+#include "../Diagnostics/RendererDiagnostics.h"
+#include <sstream>
 
 namespace renderer
 {
@@ -57,18 +60,11 @@ namespace renderer
         return m_origGetDepth(device, outSurface);
     }
 
-    void DepthCapture::BeforeClear(IDirect3DDevice9* device, DWORD count, DWORD flags, float z)
+    bool DepthCapture::BeforeClear(IDirect3DDevice9* device, DWORD count, const D3DRECT* rects, DWORD flags, float z)
     {
-        if (!m_origGetDepth || !m_origSetDepth || !(flags & D3DCLEAR_ZBUFFER))
-            return;
-
-        if (m_owner == device)
-        {
-            return;
-        }
-
-        if (count != 0 || z != 1.0f || m_owner != nullptr)
-            return;
+        if (!device || !m_origGetDepth || !m_origSetDepth ||
+            !(flags & D3DCLEAR_ZBUFFER) || z != 1.0f || m_owner != nullptr)
+            return false;
 
         ComPtr<IDirect3DSurface9> rt, back, ds;
         D3DSURFACE_DESC desc{}, rd{};
@@ -77,30 +73,55 @@ namespace renderer
         if (FAILED(device->GetRenderTarget(0, rt.GetAddressOf())) ||
             FAILED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, back.GetAddressOf())) ||
             rt.Get() != back.Get())
-            return;
+            return false;
 
         if (FAILED(m_origGetDepth(device, ds.GetAddressOf())) || !ds ||
             FAILED(ds->GetDesc(&desc)) || FAILED(rt->GetDesc(&rd)) ||
             FAILED(device->GetViewport(&vp)))
-            return;
+        {
+            RendererDiagnostics::Instance().LogOnce("DepthCapture", "depth-query",
+                "Could not query the backbuffer depth surface or viewport.");
+            return false;
+        }
 
-        if (desc.MultiSampleType != D3DMULTISAMPLE_NONE ||
-            desc.Width != rd.Width || desc.Height != rd.Height ||
+        if (desc.Width != rd.Width || desc.Height != rd.Height ||
             vp.X != 0 || vp.Y != 0 || vp.Width != rd.Width || vp.Height != rd.Height)
-            return;
+            return false;
 
-        if (desc.Format != D3DFMT_D24X8 && desc.Format != D3DFMT_D24S8)
-            return;
+        if (!ClearsFullViewport(count, rects, vp))
+            return false;
+
+        if (desc.MultiSampleType != D3DMULTISAMPLE_NONE || rd.MultiSampleType != D3DMULTISAMPLE_NONE)
+        {
+            RendererDiagnostics::Instance().LogOnce("DepthCapture", "multisampling",
+                "MSAA prevents INTZ depth capture. Set in-game Multisampling to 1x and restart the client.");
+            return false;
+        }
+
+        if (!CanReplaceDepthFormat(desc.Format))
+        {
+            RendererDiagnostics::Instance().LogOnce("DepthCapture", "depth-format",
+                "Unsupported backbuffer depth format: " + std::to_string(desc.Format));
+            return false;
+        }
 
         ComPtr<IDirect3DTexture9> tex;
         ComPtr<IDirect3DSurface9> replacement;
-        if (FAILED(device->CreateTexture(desc.Width, desc.Height, 1,
+        HRESULT result = device->CreateTexture(desc.Width, desc.Height, 1,
                 D3DUSAGE_DEPTHSTENCIL,
                 static_cast<D3DFORMAT>(MAKEFOURCC('I','N','T','Z')),
-                D3DPOOL_DEFAULT, tex.GetAddressOf(), nullptr)) ||
-            FAILED(tex->GetSurfaceLevel(0, replacement.GetAddressOf())) ||
-            FAILED(m_origSetDepth(device, replacement.Get())))
-            return;
+                D3DPOOL_DEFAULT, tex.GetAddressOf(), nullptr);
+        if (SUCCEEDED(result)) result = tex->GetSurfaceLevel(0, replacement.GetAddressOf());
+        if (SUCCEEDED(result)) result = m_origSetDepth(device, replacement.Get());
+        if (FAILED(result))
+        {
+            std::ostringstream message;
+            message << "INTZ depth setup failed: hr=0x" << std::hex << static_cast<unsigned long>(result)
+                    << std::dec << " size=" << desc.Width << 'x' << desc.Height
+                    << " originalFormat=" << desc.Format;
+            RendererDiagnostics::Instance().LogOnce("DepthCapture", "intz-setup", message.str());
+            return false;
+        }
 
         m_depthTexture = tex;
         m_depthSurface = replacement;
@@ -108,6 +129,9 @@ namespace renderer
         m_target = rt;
         m_owner = device;
         ++m_depthFrames;
+        RendererDiagnostics::Instance().RecordDepthCapture();
+        RendererDiagnostics::Instance().LogOnce("DepthCapture", "active", "INTZ depth capture active.");
+        return true;
     }
 
     void DepthCapture::OnFrameEnd(IDirect3DDevice9* device)

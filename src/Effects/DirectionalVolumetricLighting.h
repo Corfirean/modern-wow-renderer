@@ -25,7 +25,7 @@ namespace renderer
     {
         bool enabled = true;
         uint32_t quality = 1;
-        uint32_t sampleCount = 6;
+        uint32_t sampleCount = 16;
         float resolutionScale = 0.25f;
         float densityScale = 1.0f;
         float maxDistance = 520.0f;
@@ -38,6 +38,20 @@ namespace renderer
         float mistFalloff = 0.42f;
         float mistBaseOffset = -3.0f;
         float noiseAmount = 0.22f;
+        // Separate local world-space fog volume. It is evaluated inside the
+        // same raymarch as the atmosphere, so extinction/scattering, depth
+        // occlusion, temporal reprojection and water boundaries remain one
+        // coherent medium rather than a fullscreen alpha overlay.
+        bool edgeFogEnabled = false;
+        float edgeFogDistance = 185.f;
+        float edgeFogPower = 2.f;
+        bool localFogEnabled = true;
+        float localFogDensity = 0.036f;
+        float localFogHeightFalloff = 1.f / 3.f;
+        float localFogBaseOffset = -1.0f;
+        float localFogWakeStrength = 0.85f;
+        float localFogWakeRadius = 5.0f;
+        float localFogTrailLength = 18.0f;
         float extinction = 1.0f;
         float moonStrength = 0.16f;
         bool temporalEnabled = true;
@@ -77,9 +91,11 @@ namespace renderer
         static DirectionalVolumetricLighting& Instance();
         void Configure(const std::wstring& basePath);
         void Reset(IDirect3DDevice9* device);
-        bool Render(IDirect3DDevice9* device, const FrameContext& frameContext, IDirect3DSurface9* targetSurface);
+        bool Render(IDirect3DDevice9* device, const FrameContext& frameContext,
+                    IDirect3DSurface9* targetSurface, bool globalFogEnabled = true);
         VolumetricSettings& Settings() { return m_settings; }
         const VolumetricSettings& Settings() const { return m_settings; }
+        IDirect3DTexture9* GetInteractionState() const { return m_groundHeightTexture[1-m_groundHeightWriteIndex].Get(); }
         IDirect3DTexture9* GetRaymarchTexture() const { return m_integratedTexture.Get(); }
 
     private:
@@ -119,27 +135,25 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_compositeShader;
         ComPtr<IDirect3DPixelShader9> m_boundaryShader;
         ComPtr<IDirect3DPixelShader9> m_boundaryDebugShader;
-        // Ground-height reference for fog/mist, so their base height tracks
-        // actual terrain/water level instead of the camera's own altitude
-        // (fogBase/mistBase used to be cameraPosition.z + offset - flying
-        // up took the fog layer up with you). A tiny reduction pass takes
-        // an 8x8 grid of world-space heights reconstructed from the
-        // boundary depth and keeps the minimum (closest to the ground/
-        // water actually in view), read back asynchronously (2-deep ring,
-        // ~1-2 frames of latency, no GPU stall) and EMA-smoothed.
+        // GPU-only ping-pong state: actor XY, ground Z, wake, planar velocity.
         ComPtr<IDirect3DPixelShader9> m_groundHeightShader;
+        ComPtr<IDirect3DPixelShader9> m_localFogFieldShader;
+        ComPtr<IDirect3DTexture9> m_localFogFieldTexture;
+        ComPtr<IDirect3DSurface9> m_localFogFieldSurface;
         ComPtr<IDirect3DTexture9> m_groundHeightTexture[2];
         ComPtr<IDirect3DSurface9> m_groundHeightSurface[2];
-        ComPtr<IDirect3DSurface9> m_groundHeightStaging[2];
         uint32_t m_groundHeightWriteIndex = 0;
         bool m_groundHeightIssued[2]{};
-        float m_smoothedGroundHeight = 0.0f;
-        bool m_groundHeightValid = false;
         Vec3 m_previousCamera{};
         float m_previousProjection[4]{};
         Matrix4 m_previousView{};
         bool m_previousViewValid = false;
         bool m_previousWasMoon = false;
         float m_previousCelestialIntensity = 0.0f;
+        uint64_t m_previousLocalLightSignature = 0;
+        std::wstring m_logPath;
+        uint64_t m_renderFrames = 0;
+        ULONGLONG m_lastFogTick = 0;
+        float m_fogElapsed = 0;
     };
 }
