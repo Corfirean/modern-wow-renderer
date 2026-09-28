@@ -13,6 +13,16 @@
 
 namespace renderer
 {
+    namespace
+    {
+        // Particle draws may be skipped briefly when a carried flame is close
+        // to the character silhouette or crosses the frustum edge. Keep the
+        // already-confirmed emitter stable across those gaps, then fade it out
+        // slowly enough that unequipping a torch does not cause a hard pop.
+        constexpr ULONGLONG kAttachedHoldMs = 1000;
+        constexpr ULONGLONG kAttachedLifetimeMs = 3500;
+    }
+
     LocalLightManager& LocalLightManager::Instance()
     {
         static LocalLightManager manager;
@@ -201,7 +211,7 @@ namespace renderer
             Vec3{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2]}*view.z;
         if(!std::isfinite(Length(world))||Length(world-f.cameraPosition)>120)continue;
         ULONGLONG now=GetTickCount64();
-        auto found=std::find_if(m_attached.begin(),m_attached.end(),[&](const AttachedEmitter& e){return now-e.seen<250&&Length(e.light.position-world)<1.5f;});
+        auto found=std::find_if(m_attached.begin(),m_attached.end(),[&](const AttachedEmitter& e){return now-e.seen<kAttachedLifetimeMs&&Length(e.light.position-world)<1.5f;});
         if(found!=m_attached.end()){found->light.position=world;found->seen=now;continue;}
         if(m_attached.size()>=64)return;
         LocalLightSource light;light.stableId=0x544f524300000000ull|m_nextAttachedId++;light.position=world;
@@ -276,10 +286,11 @@ namespace renderer
         }
 
         const ULONGLONG emitterNow=GetTickCount64();
-        std::erase_if(m_attached,[&](const AttachedEmitter& e){return emitterNow-e.seen>250;});
+        std::erase_if(m_attached,[&](const AttachedEmitter& e){return emitterNow-e.seen>kAttachedLifetimeMs;});
         for(auto& emitter:m_attached){auto light=emitter.light;float distance=Length(light.position-cameraPosition);
             if(distance>100)continue;
-            light.intensity*=std::clamp(1.f-float(emitterNow-emitter.seen)/250.f,0.f,1.f);
+            const float age=float(emitterNow-emitter.seen);
+            light.intensity*=age<=kAttachedHoldMs?1.f:std::clamp(1.f-(age-kAttachedHoldMs)/float(kAttachedLifetimeMs-kAttachedHoldMs),0.f,1.f);
             light.score=4.f*light.intensity*light.radius*light.radius/std::max(4.f,distance*distance);candidates.push_back(light);}
 
         for (auto light : m_manifestLights)

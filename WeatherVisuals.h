@@ -69,6 +69,9 @@ inline int nativeWeatherSeenThisFrame = 0;
 inline int nativeWeatherMode = 0;
 inline UINT nativeWeatherPrimitives = 0;
 inline DWORD lastNativeWeatherTick = 0;
+inline bool composedThisFrame = false;
+inline bool weatherSuspended = false;
+inline constexpr DWORD nativeWeatherHoldMs = 5000;
 inline std::unordered_set<uint64_t> loggedParticleCandidates;
 inline unsigned loggedParticleCandidateCount = 0;
 
@@ -119,7 +122,7 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0
     float isSnow = step(1.5, weatherParams.z) * step(weatherParams.z, 2.5);
     float isSand = step(2.5, weatherParams.z);
     
-    for (int i = 0; i < 3; ++i)
+    [unroll] for (int i = 0; i < 3; ++i)
     {
         float lz = layerDepths[i];
         // Depth occlusion: if scene is closer than this layer, precipitation behind is occluded
@@ -491,9 +494,10 @@ inline void Reset(IDirect3DDevice9* device)
     currentDevice = device;
     worldGeometrySeenThisFrame = false;
     nativeWeatherSeenThisFrame = 0;
-    nativeWeatherMode = 0;
     nativeWeatherPrimitives = 0;
-    lastNativeWeatherTick = 0;
+    composedThisFrame = false;
+    weatherSuspended = nativeWeatherMode != 0;
+    lastTick = GetTickCount();
 }
 
 inline bool IsTerrainShader(uint64_t psHash)
@@ -613,6 +617,7 @@ public:
             alphaScale };
         device->SetPixelShader(nativeParticlePS.Get());
         device->SetPixelShaderConstantF(0, params, 1);
+        m_modified = true;
         if (SUCCEEDED(device->SetTexture(0, replacement)))
             m_replaced = true;
         internal = false;
@@ -620,7 +625,7 @@ public:
 
     ~NativeParticleScope()
     {
-        if (!m_replaced || !m_device) return;
+        if (!m_modified || !m_device) return;
         internal = true;
         m_device->SetTexture(0, m_original.Get());
         m_device->SetPixelShader(m_originalPS.Get());
@@ -634,39 +639,22 @@ private:
     ComPtr<IDirect3DPixelShader9> m_originalPS;
     float m_originalC0[4]{};
     bool m_replaced = false;
+    bool m_modified = false;
 };
 
-inline void Present(IDirect3DDevice9* device)
+// Render the procedural continuity layer immediately before WoW's first UI
+// draw. Native particles still provide the world-space precipitation; this
+// fills gaps caused by their small player-centred simulation volume without
+// touching game UI or the F7 overlay.
+inline void BeforeDraw(IDirect3DDevice9* device)
 {
-    if (!enabled || !effectEnabled || !device) return;
-
-    // F9 belongs to celestial diagnostics. Weather uses F10 so the two
-    // independent modules cannot toggle each other in the same key press.
-    bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    if (hotkey && down && !keyDown && pid == GetCurrentProcessId())
-    {
-        active = !active;
-        Log(active ? "WeatherVisuals activated (F10)" : "WeatherVisuals paused (F10)");
-    }
-    keyDown = down;
-    if (!active) return;
-
-    // Publish what the game actually rendered this frame, then reset the
-    // observer. There is intentionally no fullscreen precipitation pass:
-    // Present happens after WoW's UI and glue screens.
-    if (nativeWeatherSeenThisFrame)
-    {
-        nativeWeatherMode = nativeWeatherSeenThisFrame;
-        lastNativeWeatherTick = GetTickCount();
-    }
-    else if (lastNativeWeatherTick && GetTickCount() - lastNativeWeatherTick > 300)
-        nativeWeatherMode = 0;
-    nativeWeatherSeenThisFrame = 0;
-    nativeWeatherPrimitives = 0;
-    worldGeometrySeenThisFrame = false;
-    return;
+    const bool isUi = renderer::g_trackedState.vsHash == 0xd9e7756460af6296ull ||
+                      renderer::g_trackedState.psHash == 0xc29c7060b723c0c6ull;
+    if (!isUi || composedThisFrame || !enabled || !effectEnabled || !active || !device)
+        return;
+    const int renderMode = nativeWeatherMode ? (mode ? mode : nativeWeatherMode) : 0;
+    if (!renderMode) return;
+    composedThisFrame = true;
 
     // Time step calculation
     DWORD now = GetTickCount();
@@ -741,7 +729,9 @@ inline void Present(IDirect3DDevice9* device)
         frame.cameraValid ? frame.projUnpack[2] : float(desc.Width) / float(desc.Height),
         frame.cameraValid ? frame.projUnpack[3] : 1.0f };
     // c1: Weather params
-    float weatherConst[4] = { elapsedTime, intensity, float(mode), speed };
+    // A restrained layer supplements native particles rather than doubling
+    // their density. It remains camera-relative, so mount speed cannot outrun it.
+    float weatherConst[4] = { elapsedTime, intensity * .45f, float(renderMode), speed };
     // c2: Wind params
     float windConst[4] = { windX, windY, atmosphereHaze, smoothedIndoor };
     // c3: Screen params
@@ -800,7 +790,7 @@ inline void Present(IDirect3DDevice9* device)
     device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(QuadVertex));
 
     // Render camera lens droplets pass (if rain and enabled)
-    if (lensDroplets && mode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
+    if (lensDroplets && renderMode == 1 && lensDropletsPS && sceneCopyTex && lensStrength > 0.01f)
     {
         // A render-target texture cannot be a StretchRect destination while
         // it is still bound for sampling by the precipitation pass.
@@ -831,6 +821,54 @@ inline void Present(IDirect3DDevice9* device)
 
     }
     internal = false;
+}
+
+inline void Present(IDirect3DDevice9*, bool preserveDetection = false)
+{
+    // F9 belongs to celestial diagnostics. Weather uses F10 so the two
+    // independent modules cannot toggle each other in the same key press.
+    bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    DWORD foregroundPid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foregroundPid);
+    const bool focused = foregroundPid == GetCurrentProcessId();
+    if (hotkey && down && !keyDown && focused)
+    {
+        active = !active;
+        Log(active ? "WeatherVisuals activated (F10)" : "WeatherVisuals paused (F10)");
+    }
+    keyDown = down;
+
+    const DWORD now = GetTickCount();
+    if (nativeWeatherSeenThisFrame)
+    {
+        nativeWeatherMode = nativeWeatherSeenThisFrame;
+        lastNativeWeatherTick = now;
+        weatherSuspended = false;
+    }
+    else if ((!focused || preserveDetection) && nativeWeatherMode)
+    {
+        // Alt+Tab and the interactive F7 overlay can pause or throttle native
+        // particle emission. Absence of a draw then is not evidence that the
+        // weather ended.
+        weatherSuspended = true;
+    }
+    else if (weatherSuspended && nativeWeatherMode)
+    {
+        // Give the client time to refill its native particle system after
+        // focus/device restoration while the continuity layer stays alive.
+        lastNativeWeatherTick = now;
+        weatherSuspended = false;
+    }
+    else if (lastNativeWeatherTick && now - lastNativeWeatherTick > nativeWeatherHoldMs)
+    {
+        nativeWeatherMode = 0;
+        lastNativeWeatherTick = 0;
+    }
+
+    nativeWeatherSeenThisFrame = 0;
+    nativeWeatherPrimitives = 0;
+    worldGeometrySeenThisFrame = false;
+    composedThisFrame = false;
 }
 
 inline const char* GetStatusText()

@@ -1,0 +1,143 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Win32 ${{ matrix.configuration }}
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Debug
+          - Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate MSBuild and build
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $installPath = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -property installationPath
+
+          if (-not $installPath) {
+            throw "Visual Studio / MSBuild not found"
+          }
+
+          $msbuild = Join-Path $installPath "MSBuild\Current\Bin\MSBuild.exe"
+          Write-Host "Using MSBuild: $msbuild"
+
+          & $msbuild "ModernWoWRenderer.sln" `
+            /m `
+            /p:Configuration="${{ matrix.configuration }}" `
+            /p:Platform="Win32" `
+            /p:PlatformToolset="v145" `
+            /verbosity:minimal
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify output
+        shell: pwsh
+        run: |
+          $dir = "build\${{ matrix.configuration }}"
+          $required = @(
+            "$dir\d3d9.dll",
+            "$dir\ModernWoWRenderer.ini",
+            "$dir\GraphicsEffects.ini"
+          )
+
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "Expected build output is missing: $file"
+            }
+            Write-Host "OK: $file"
+          }
+
+      - name: Prepare release package
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $source = "build\Release"
+          $package = "package"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+
+          Copy-Item "$source\d3d9.dll" $package
+          Copy-Item "$source\ModernWoWRenderer.ini" $package
+          Copy-Item "$source\GraphicsEffects.ini" $package
+
+          $materialCache = Join-Path $package "MaterialCache"
+          New-Item -ItemType Directory -Force -Path $materialCache | Out-Null
+          Copy-Item "$source\MaterialCache\local_light_manifest.json" $materialCache
+          Copy-Item "$source\MaterialCache\LocalLightReview.json" $materialCache
+          if (Test-Path "$source\textures") {
+            Copy-Item "$source\textures" $package -Recurse
+          }
+
+      - name: Upload Release build
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: modern-wow-renderer-win32-${{ github.sha }}
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 10
+
+    steps:
+      - name: Download Release build
+        uses: actions/download-artifact@v4
+        with:
+          name: modern-wow-renderer-win32-${{ github.sha }}
+          path: package
+
+      - name: Create ZIP archive
+        shell: pwsh
+        run: |
+          $archive = "modern-wow-renderer-win32-${{ github.sha }}.zip"
+          Compress-Archive -Path "package\*" -DestinationPath $archive -CompressionLevel Optimal
+
+          if (-not (Test-Path -LiteralPath $archive)) {
+            throw "Release archive was not created: $archive"
+          }
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Modern WoW Renderer build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: true
+          files: modern-wow-renderer-win32-${{ github.sha }}.zip

@@ -137,6 +137,9 @@ namespace renderer
         ComPtr<IDirect3DPixelShader9> m_boundaryDebugShader;
         // GPU-only ping-pong state: actor XY, ground Z, wake, planar velocity.
         ComPtr<IDirect3DPixelShader9> m_groundHeightShader;
+        ComPtr<IDirect3DPixelShader9> m_localFogFieldShader;
+        ComPtr<IDirect3DTexture9> m_localFogFieldTexture;
+        ComPtr<IDirect3DSurface9> m_localFogFieldSurface;
         ComPtr<IDirect3DTexture9> m_groundHeightTexture[2];
         ComPtr<IDirect3DSurface9> m_groundHeightSurface[2];
         uint32_t m_groundHeightWriteIndex = 0;

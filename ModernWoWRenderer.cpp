@@ -148,7 +148,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     waterreflection::Present();
     volume::Present(d);
     renderer::MaterialCacheManager::Instance().Present(d);
-    weathervisuals::Present(d);
+    weathervisuals::Present(d,tuningoverlay::visible);
     if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("F7 overlay changed GraphicsEffects.ini");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
@@ -199,8 +199,7 @@ HRESULT WINAPI HookedClear(IDirect3DDevice9* d,DWORD n,const D3DRECT* rect,DWORD
         (watereffect::reflectionsEnabled||watereffect::refractionEnabled||watereffect::depthEnabled||watereffect::foamEnabled);
     if(volume::internal||g_drawingOverlay||(unified&&!graphicsActive)||(!volume::HasActiveEffects()&&!waterNeedsDepth))
         return originalClear(d,n,rect,flags,color,z,stencil);
-    renderer::RendererDiagnostics::Instance().OnFrameBegin();
-    volume::BeforeClear(d,n,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
+    volume::BeforeClear(d,n,rect,flags,z);return originalClear(d,n,rect,flags,color,z,stencil);
 }
 using SetRenderStateFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DRENDERSTATETYPE, DWORD);
 using SetRenderTargetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
@@ -325,10 +324,11 @@ renderer::DrawClassification ClassifyCurrentDraw(IDirect3DDevice9* d, D3DPRIMITI
 }
 
 HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT n) {
-    if(volume::internal)return originalDraw(d,t,start,n);
+    if(volume::internal||weathervisuals::internal)return originalDraw(d,t,start,n);
     if(unified&&!graphicsActive)return originalDraw(d,t,start,n);
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
         volume::ShadowDraw(d,dc,[&]{return originalDraw(d,t,start,n);});
@@ -352,10 +352,11 @@ HRESULT WINAPI HookedDraw(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT start,UINT
 }
 
 HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base,UINT min,UINT vertices,UINT start,UINT n) {
-    if(volume::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
+    if(volume::internal||weathervisuals::internal)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(unified&&!graphicsActive)return originalDrawIndexed(d,t,base,min,vertices,start,n);
     if(!g_drawingOverlay){weathervisuals::ObserveWorldDraw();nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitive",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);}
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
         volume::ShadowDraw(d,dc,[&]{return originalDrawIndexed(d,t,base,min,vertices,start,n);});
@@ -388,10 +389,11 @@ HRESULT WINAPI HookedDrawIndexed(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,INT base
 }
 
 HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const void* v,UINT stride) {
-    if(volume::internal)return originalDrawUP(d,t,n,v,stride);
+    if(volume::internal||weathervisuals::internal)return originalDrawUP(d,t,n,v,stride);
     if(unified&&!graphicsActive)return originalDrawUP(d,t,n,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
         volume::ShadowDraw(d,dc,[&]{return originalDrawUP(d,t,n,v,stride);});
@@ -416,10 +418,11 @@ HRESULT WINAPI HookedDrawUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT n,const 
 }
 
 HRESULT WINAPI HookedDrawIndexedUP(IDirect3DDevice9* d,D3DPRIMITIVETYPE t,UINT min,UINT vertices,UINT n,const void* indices,D3DFORMAT f,const void* v,UINT stride) {
-    if(volume::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
+    if(volume::internal||weathervisuals::internal)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(unified&&!graphicsActive)return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);
     if(!g_drawingOverlay)nativeshadowdiag::OnDraw(d,"DrawIndexedPrimitiveUP",t,n,renderer::g_trackedState.vsHash,renderer::g_trackedState.psHash,renderer::g_trackedState.currentFVF,renderer::g_trackedState.currentVDecl,renderer::g_trackedState.alphaBlend,renderer::g_trackedState.alphaTest,renderer::g_trackedState.zEnable,renderer::g_trackedState.zWrite);
     if(!g_drawingOverlay)volume::BeforeDraw(d);
+    if(!g_drawingOverlay)weathervisuals::BeforeDraw(d);
     if(!g_drawingOverlay&&volume::ShouldUpdateShadows()){
         auto dc=ClassifyCurrentDraw(d,t,n);
         volume::ShadowDraw(d,dc,[&]{return originalDrawIndexedUP(d,t,min,vertices,n,indices,f,v,stride);});

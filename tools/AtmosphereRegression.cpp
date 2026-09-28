@@ -14,12 +14,15 @@
 #include "../src/Effects/GroundSurfaceCapture.h"
 #include "../src/Lighting/LocalLightManager.h"
 #include "../src/D3D9/DepthCapture.h"
+#include "../src/D3D9/DepthCapturePolicy.h"
+#include "../WeatherVisuals.h"
 using Microsoft::WRL::ComPtr;
 using namespace renderer;
 void Check(HRESULT h) { if (FAILED(h)) { printf("HRESULT=%08lx\n", h); throw std::runtime_error("D3D call"); } }
 void Require(bool value, const char* name) { if (!value) throw std::runtime_error(name); printf("PASS %s\n", name); }
 HRESULT WINAPI SetDepth(IDirect3DDevice9* d, IDirect3DSurface9* s) { return d->SetDepthStencilSurface(s); }
 HRESULT WINAPI GetDepth(IDirect3DDevice9* d, IDirect3DSurface9** s) { return d->GetDepthStencilSurface(s); }
+#include "LocalFogFieldRegression.h"
 int main() try {
  wchar_t path[MAX_PATH]{}; GetSystemDirectoryW(path, MAX_PATH); wcscat_s(path,L"\\d3d9.dll");
  auto dll=LoadLibraryW(path);
@@ -30,6 +33,32 @@ int main() try {
  pp.hDeviceWindow=window; pp.BackBufferWidth=128; pp.BackBufferHeight=128; pp.BackBufferFormat=D3DFMT_A8R8G8B8;
  ComPtr<IDirect3DDevice9> d; Check(api->CreateDevice(0,D3DDEVTYPE_HAL,window,D3DCREATE_SOFTWARE_VERTEXPROCESSING,&pp,d.GetAddressOf()));
  DepthCapture::Instance().SetFunctions(SetDepth,GetDepth);
+ // A full explicit clear is equivalent to Clear(0,nullptr), while a partial
+ // clear cannot safely initialize an otherwise undefined replacement buffer.
+ D3DVIEWPORT9 policyViewport{10,20,100,80,0,1};
+ D3DRECT policyFull{10,20,110,100},policyPartial{10,20,109,100};
+ Require(ClearsFullViewport(0,nullptr,policyViewport),"implicit full clear policy");
+ Require(ClearsFullViewport(1,&policyFull,policyViewport),"explicit full-viewport clear policy");
+ Require(!ClearsFullViewport(1,&policyPartial,policyViewport),"partial clear rejected by policy");
+ for(auto format:{D3DFMT_D16,D3DFMT_D32,D3DFMT_D24X8,D3DFMT_D24S8})
+  Require(CanReplaceDepthFormat(format),"standard depth format policy");
+ Require(!CanReplaceDepthFormat(D3DFMT_D16_LOCKABLE),"incompatible depth format rejected");
+ // Exercise the production capture lifecycle on the two common 3.3.5a
+ // formats, including the explicit rectangle used by affected clients.
+ for(auto format:{D3DFMT_D16,D3DFMT_D24S8}){
+  ComPtr<IDirect3DSurface9> originalDepth,currentDepth;
+  Check(d->CreateDepthStencilSurface(128,128,format,D3DMULTISAMPLE_NONE,0,TRUE,originalDepth.GetAddressOf(),nullptr));
+  Check(d->SetDepthStencilSurface(originalDepth.Get()));
+  D3DRECT partial{0,0,64,64},full{0,0,128,128};
+  Require(!DepthCapture::Instance().BeforeClear(d.Get(),1,&partial,D3DCLEAR_ZBUFFER,1.f),"partial clear does not start depth capture");
+  Require(DepthCapture::Instance().BeforeClear(d.Get(),1,&full,D3DCLEAR_ZBUFFER,1.f),"explicit clear starts depth capture");
+  Require(DepthCapture::Instance().HasDepth(),"replacement INTZ depth is active");
+  Check(d->GetDepthStencilSurface(currentDepth.GetAddressOf()));Require(currentDepth.Get()==DepthCapture::Instance().GetDepthSurface(),"replacement depth is bound");
+  currentDepth.Reset();DepthCapture::Instance().OnFrameEnd(d.Get());
+  Check(d->GetDepthStencilSurface(currentDepth.GetAddressOf()));Require(currentDepth.Get()==originalDepth.Get(),"frame end restores original depth");
+ }
+ Check(d->SetDepthStencilSurface(nullptr));
+ TestLocalFogField(d.Get());
  ComPtr<IDirect3DSurface9> back,read; Check(d->GetBackBuffer(0,0,D3DBACKBUFFER_TYPE_MONO,back.GetAddressOf()));
  Check(d->CreateOffscreenPlainSurface(128,128,D3DFMT_A8R8G8B8,D3DPOOL_SYSTEMMEM,read.GetAddressOf(),nullptr));
  auto texture=[&](D3DFORMAT fmt){ComPtr<IDirect3DTexture9> t; Check(d->CreateTexture(128,128,1,0,fmt,D3DPOOL_MANAGED,t.GetAddressOf(),nullptr)); return t;};
@@ -58,7 +87,20 @@ int main() try {
  };
  float sentinels[64][4];for(int c=0;c<64;++c)for(int j=0;j<4;++j)sentinels[c][j]=float(c*4+j)*.003f;
  auto pixel=[&](int px=64,int py=64){Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));DWORD p=reinterpret_cast<DWORD*>(static_cast<BYTE*>(r.pBits)+py*r.Pitch)[px];Check(read->UnlockRect());return p;};
- auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");return pixel();};
+ // The continuity layer is injected before a confirmed UI draw, so it cannot
+ // disappear under F7 and cannot paint over WoW's interface.
+ weathervisuals::Configure(L".\\");weathervisuals::enabled=weathervisuals::effectEnabled=weathervisuals::active=true;
+ weathervisuals::mode=0;weathervisuals::nativeWeatherMode=1;weathervisuals::intensity=1;weathervisuals::lensDroplets=false;weathervisuals::composedThisFrame=false;
+ g_trackedState.vsHash=0xd9e7756460af6296ull;g_trackedState.psHash=0;
+ Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff202020,1,0));
+ Check(d->BeginScene());weathervisuals::BeforeDraw(d.Get());Check(d->EndScene());
+ Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT weatherRead{};Check(read->LockRect(&weatherRead,nullptr,D3DLOCK_READONLY));int weatherPixels=0;
+ for(int y=0;y<128;++y)for(int x=0;x<128;++x)weatherPixels+=reinterpret_cast<DWORD*>(static_cast<BYTE*>(weatherRead.pBits)+y*weatherRead.Pitch)[x]!=0xff202020;
+ Check(read->UnlockRect());Require(weathervisuals::composedThisFrame&&weatherPixels>100,"rain continuity renders before UI independently of native particle radius");
+ weathervisuals::lastNativeWeatherTick=GetTickCount()-weathervisuals::nativeWeatherHoldMs-1;weathervisuals::Present(nullptr,true);
+ Require(weathervisuals::nativeWeatherMode==1&&weathervisuals::weatherSuspended,"F7 preserves detected weather across missing native draws");
+ weathervisuals::Reset(d.Get());weathervisuals::nativeWeatherMode=0;weathervisuals::weatherSuspended=false;g_trackedState={};
+ auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
  auto diff=[](DWORD a,DWORD b){int m=0;for(int s=0;s<24;s+=8)m=std::max(m,abs(int((a>>s)&255)-int((b>>s)&255)));return m;};
  encode(120,1);DWORD standard=render(true);Require(diff(standard,0xff202020)>8,"fog visible on first resource creation");
  encode(120,.94f);DWORD compressed=render(true);printf("fog z=120 standard=%08lx compressed=%08lx\n",standard,compressed);Require(diff(standard,compressed)<=2,"viewport MaxZ=.94 matches MaxZ=1");
@@ -70,6 +112,10 @@ int main() try {
  settings.localFogHeightFalloff=.125f;DWORD thick=render(false);
  Require(diff(thick,0xff202020)>diff(thin,0xff202020)+5,"increasing local height thickens the volume");
  settings.localFogHeightFalloff=1.f/3;Require(diff(render(false),0xff202020)<=2,"view above compact bank remains clear within Gaussian tail");
+ settings.localFogBaseOffset=0;settings.localFogHeightFalloff=1.f/3;render(false);DWORD offsetZero=pixel(64,100);
+ settings.localFogBaseOffset=-10;render(false);Require(diff(pixel(64,100),0xff202020)<=1&&diff(offsetZero,0xff202020)>5,"negative BaseOffset lowers the actual local layer");
+ settings.localFogBaseOffset=4;DWORD elevated=render(false);settings.localFogBaseOffset=0;DWORD grounded=render(false);
+ Require(diff(elevated,grounded)>5,"positive BaseOffset raises the local layer");settings.localFogBaseOffset=-1;
  settings.localFogHeightFalloff=.125f;fill(noise.Get(),0xff000000);
  Require(render(false)==0xff202020,"gaps between banks have zero local haze");fill(noise.Get(),0xffb0b0b0);
  // Reproduce the user's low-wash night scene, with no selected lamps.
@@ -194,6 +240,9 @@ int main() try {
  FrameContext::Current()=f;g_trackedState.vsHash=0xff32338728131932ull;g_trackedState.zEnable=g_trackedState.alphaBlend=true;
  manager.Reset();manager.ObserveTorchDraw(d.Get(),D3DPT_TRIANGLELIST,0,0,1);manager.SelectForFrame({0,0,0},{0,1,0});
  Require(!manager.Selected().empty()&&(manager.Selected()[0].flags&LocalLightAttached),"held torch mesh creates a dynamic world light");
+ auto heldTorchId=manager.Selected()[0].stableId;Sleep(350);manager.SelectForFrame({0,0,0},{0,1,0});
+ bool torchHeldAcrossGap=false;for(const auto& selected:manager.Selected())if(selected.stableId==heldTorchId&&selected.intensity>1.7f)torchHeldAcrossGap=true;
+ Require(torchHeldAcrossGap,"attached torch survives a skipped or occluded particle draw");
  Vec3 torchPosition=manager.Selected()[0].position;boneRows[0][3]=1;Check(d->SetVertexShaderConstantF(31,boneRows[0],3));
  manager.ObserveTorchDraw(d.Get(),D3DPT_TRIANGLELIST,0,0,1);manager.SelectForFrame({0,0,0},{0,1,0});
  Require(manager.Selected().size()==1&&fabsf(manager.Selected()[0].position.x-torchPosition.x-1)<.01f,"torch light follows the animated hand without duplicates");
@@ -261,8 +310,13 @@ int main() try {
   double length=std::min(z*scale,97.5),tau=0,step=length/8192;
   double bank=smooth(.30f,.78f,176.f/255),height=3*(.48+.32*bank);
   for(int i=0;i<8192;++i){double t=(i+.5)*step,px=vx/scale*t,py=t/scale,pz=vy/scale*t;
-   double above=std::max(0.,pz-(-5+.1*px+.08*py));
-   double density=.1*exp(-2*above*above/(height*height))*bank*bank*2.2;
+   // Constant-noise fixture: independently integrate the four sampled height
+   // layers along the real slope, including the now-active BaseOffset.
+   double relative=pz-(-5+.1*px+.08*py)-settings.localFogBaseOffset;
+   double h=std::max(0.,relative)/3,density=0;
+   for(int layer=0;layer<4;++layer){double slice=layer*.5,edge=std::max(0.,bank-(1-176./255)*slice*.42);
+    density+=edge*edge*exp(-2*slice*slice/(height*height/9))*std::max(0.,1-abs(h-slice)*2);}
+   density*=.1*2.2*smooth(-.4f,.05f,float(relative));
    density*=1-smooth(65*.65f,65,float(sqrt(px*px+py*py)));density*=smooth(1,6,float(t));tau+=density*step;}
   double alpha=1-exp(-tau);return int((32./255*(1-alpha)+.72*alpha)*255+.5);};
  slopingDepth();render(false);int slopeError=0;
@@ -280,7 +334,46 @@ int main() try {
  Require(fabsf(wet[0]-3)<.01f,"water surface wins over seabed independent of draw order");
  // A hole in captured coverage must stay unknown, never invent a floating floor.
  auto missing=groundPixel(150,150);Require(missing[1]==0,"uncaptured ground has explicit missing coverage");
+ // Fill the real atlas with a premultiplied height at varying confidence.
+ // The tracked fallback is the same -5 plane, so coverage cannot change fog.
+ f.inverseView.SetZero();f.inverseView.m[0][0]=f.inverseView.m[1][2]=f.inverseView.m[2][1]=f.inverseView.m[3][3]=1;
+ fog.Reset(d.Get());encode(120,.94f);settings.localFogBaseOffset=-1;
+ auto atlasConfidence=[&](float confidence){ScopedRenderState saved(d.Get());ComPtr<ID3DBlob> code;ComPtr<IDirect3DPixelShader9> ps;ComPtr<IDirect3DSurface9> surface;
+  const char* source="float4 value:register(c0);float4 main():COLOR0{return value;}";
+  Check(D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",0,0,code.GetAddressOf(),nullptr));Check(d->CreatePixelShader((DWORD*)code->GetBufferPointer(),ps.GetAddressOf()));
+  Check(ground.Texture()->GetSurfaceLevel(0,surface.GetAddressOf()));Check(d->SetDepthStencilSurface(nullptr));Check(d->SetRenderTarget(0,surface.Get()));
+  D3DVIEWPORT9 vp{0,0,1024,1024,0,1};Check(d->SetViewport(&vp));Check(d->SetVertexShader(nullptr));Check(d->SetPixelShader(ps.Get()));Check(d->SetFVF(D3DFVF_XYZRHW));
+  for(auto rs:{D3DRS_ZENABLE,D3DRS_ALPHABLENDENABLE,D3DRS_ALPHATESTENABLE,D3DRS_SCISSORTESTENABLE,D3DRS_STENCILENABLE,D3DRS_FOGENABLE,D3DRS_SRGBWRITEENABLE})Check(d->SetRenderState(rs,FALSE));Check(d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE));Check(d->SetRenderState(D3DRS_COLORWRITEENABLE,15));
+  float value[4]={(-5-ground.Origin()[2])*confidence,confidence,0,1};Check(d->SetPixelShaderConstantF(0,value,1));
+  struct V{float x,y,z,w;};V q[]={{-.5f,-.5f,0,1},{1023.5f,-.5f,0,1},{-.5f,1023.5f,0,1},{1023.5f,1023.5f,0,1}};
+  Check(d->BeginScene());Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());};
+ atlasConfidence(1);render(false);DWORD fullCoverage=pixel(64,100);
+ Require(diff(fullCoverage,0xff202020)>10,"coverage fixture contains visible local fog");
+ for(float confidence:{.5f,.1f,0.f}){atlasConfidence(confidence);render(false);Require(diff(fullCoverage,pixel(64,100))<=1,"partial or missing atlas coverage does not erase fog");}
  ground.Reset();Require(!ground.Texture(),"height atlas releases default-pool resources on reset");
+ render(false);Require(diff(fullCoverage,pixel(64,100))<=1,"absent atlas matches missing-coverage fallback");
+ settings.localFogEnabled=false;settings.aerialDensity=0;settings.heightDensity=.02f;settings.mistDensity=0;settings.fogBaseOffset=0;
+ render(true);DWORD heightOffsetZero=pixel(64,70);settings.fogBaseOffset=-50;render(true);Require(diff(heightOffsetZero,pixel(64,70))>5,"FogBaseOffset affects height atmosphere");
+ settings.heightDensity=0;settings.mistDensity=.04f;settings.mistBaseOffset=0;render(true);DWORD mistOffsetZero=pixel(64,100);settings.mistBaseOffset=-20;render(true);Require(diff(mistOffsetZero,pixel(64,100))>5,"GroundMistOffset affects mist atmosphere");
+
+
+ // End-to-end stationary animation with real temporal history enabled.
+ settings.localFogEnabled=true;settings.localFogDensity=.1f;settings.localFogBaseOffset=0;settings.localFogHeightFalloff=1.f/3;
+ settings.temporalEnabled=true;settings.temporalBlend=.88f;settings.resolutionScale=.5f;
+ f.viewRaw=f.inverseView;f.viewRawValid=f.previousViewValid=true;
+ D3DLOCKED_RECT nr{};Check(noise->LockRect(0,&nr,nullptr,0));
+ for(int y=0;y<128;++y)for(int x=0;x<128;++x){float a=6.2831853f*x/128,b=6.2831853f*y/128;
+  DWORD r=DWORD(128+55*sinf(a)*cosf(b)+35*sinf(3*a+2*b)),g=DWORD(128+55*cosf(2*a-b)+35*sinf(a+3*b));
+  reinterpret_cast<DWORD*>(static_cast<BYTE*>(nr.pBits)+y*nr.Pitch)[x]=0xff000000|(r<<16)|(g<<8);}
+ Check(noise->UnlockRect(0));
+ auto bankLine=[&](){std::array<DWORD,96> line{};for(int x=16;x<112;++x)line[x-16]=pixel(x,90);return line;};
+ for(int i=0;i<12;++i){Sleep(16);render(false);}auto stillStart=bankLine();
+ for(int i=0;i<80;++i){Sleep(16);render(false);}auto stillEnd=bankLine();int evolution=0;
+ for(int i=0;i<96;++i)evolution+=diff(stillStart[i],stillEnd[i]);
+ printf("stationary temporal bank evolution=%d\n",evolution);Require(evolution>30,"stationary camera and player retain autonomous flow through temporal history");
+ settings.enabled=false;Require(!fog.Render(d.Get(),f,back.Get(),false),"master atmosphere switch skips field and render");settings.enabled=true;
+ fog.Reset(d.Get());render(false);Require(fog.GetRaymarchTexture()!=nullptr,"field and integration recreate after reset with local fog enabled");
+ settings.temporalEnabled=false;
 
  // Compile the complete shipped water shader and exercise its exact local
  // reflection block on this device, with no copied approximation of the math.

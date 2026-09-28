@@ -382,10 +382,11 @@ inline bool HasActiveEffects() {
     return hasContact || hasFog || hasVolumetric || hasGlare || hasPost;
 }
 
-void BeforeClear(IDirect3DDevice9* d, DWORD count, DWORD flags, float z) {
+void BeforeClear(IDirect3DDevice9* d, DWORD count, const D3DRECT* rects, DWORD flags, float z) {
     if (!enabled || !active || internal) return;
+    if (!renderer::DepthCapture::Instance().BeforeClear(d, count, rects, flags, z)) return;
     renderer::PerformanceProfiler::Instance().OnFrameBegin(d);
-    renderer::DepthCapture::Instance().BeforeClear(d, count, flags, z);
+    renderer::RendererDiagnostics::Instance().OnFrameBegin();
     depth = renderer::DepthCapture::Instance().GetDepthTexture();
     surface = renderer::DepthCapture::Instance().GetDepthSurface();
     originalDepth = renderer::DepthCapture::Instance().GetOriginalDepth();
@@ -503,6 +504,7 @@ bool CaptureCamera(IDirect3DDevice9* d) {
     bool ok = renderer::CameraCapture::Instance().Capture(
         d, frameCtx, cfg, constants, capturedViewTranslation, capturedViewValid, cameraCaptureShaderHash);
     if (ok) {
+        renderer::RendererDiagnostics::Instance().RecordCameraCapture();
         celestialDaylight = frameCtx.daylightFactor;
         celestialMoonlight = frameCtx.moonlightFactor;
         celestialShadowLight = frameCtx.shadowLightFactor;
@@ -1313,6 +1315,7 @@ void BeforeDraw(IDirect3DDevice9* d) {
     composed = true;
     if (Composite(d)) {
         ++applied;
+        renderer::RendererDiagnostics::Instance().RecordComposite();
         if (applied == 1) Log("composited before captured UI shader; height fog + screen-space shafts");
     }
     else {
@@ -1324,7 +1327,10 @@ void BeforeDraw(IDirect3DDevice9* d) {
 void Present(IDirect3DDevice9* d) {
     if (enabled && active && !composed && ready) {
         composed = true;
-        Composite(d);
+        if (Composite(d)) {
+            ++applied;
+            renderer::RendererDiagnostics::Instance().RecordComposite();
+        }
     }
     renderer::PerformanceProfiler::Instance().OnFrameEnd(d);
     if (enabled && active && ++frames % 600 == 120) {
