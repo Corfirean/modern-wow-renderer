@@ -53,7 +53,7 @@ namespace renderer
     {
         std::wstring ini = basePath + L"GraphicsEffects.ini";
         m_enabled = GetPrivateProfileIntW(L"AIMaterials", L"Enabled", 1, ini.c_str()) != 0;
-        m_showStatus = GetPrivateProfileIntW(L"AIMaterials", L"ShowStatus", 1, ini.c_str()) != 0;
+        m_showStatus = GetPrivateProfileIntW(L"AIMaterials", L"ShowStatus", 0, ini.c_str()) != 0;
 
         int strengthInt = GetPrivateProfileIntW(L"AIMaterials", L"NormalStrengthPercent", 90, ini.c_str());
         m_globalNormalStrength = std::clamp(static_cast<float>(strengthInt) * 0.01f, 0.05f, 2.0f);
