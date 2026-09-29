@@ -29,7 +29,7 @@ inline bool active = true;
 inline bool effectEnabled = true;
 inline bool hotkey = true;
 inline bool keyDown = false;
-inline bool showStatus = true;
+inline bool showStatus = false;
 inline bool internal = false;
 
 // Configuration
@@ -469,7 +469,7 @@ inline void ReloadTuning()
     lensStrength = std::clamp(ReadTuningInt(L"LensDropletStrength", 60), 0, 200) * 0.01f;
     surfaceSplashes = ReadTuningInt(L"SurfaceSplashes", 1) != 0;
     atmosphereHaze = std::clamp(ReadTuningInt(L"AtmosphereHazePercent", 120), 0, 300) * 0.01f;
-    showStatus = ReadTuningInt(L"ShowStatus", 1) != 0;
+    showStatus = ReadTuningInt(L"ShowStatus", 0) != 0;
 }
 
 inline void Configure(const std::wstring& base)

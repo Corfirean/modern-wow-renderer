@@ -34,7 +34,7 @@ std::vector<DWORD> code,vertexCode;
 inline ComPtr<IDirect3DPixelShader9> cachedReplacementPS;
 inline ComPtr<IDirect3DVertexShader9> cachedReplacementVS;
 inline IDirect3DDevice9* cachedShaderDevice = nullptr;
-bool showStatus=true;
+bool showStatus=false;
 unsigned frameMatches=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
@@ -351,7 +351,7 @@ void Configure(const std::wstring& base) {
     enabled=GetPrivateProfileIntW(L"Water",L"Enabled",0,mainIni.c_str())!=0;
     if(!enabled)return;
     ReloadTuning();
-    showStatus=GetPrivateProfileIntW(L"Water",L"ShowStatus",1,mainIni.c_str())!=0;
+    showStatus=GetPrivateProfileIntW(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     ComPtr<ID3DBlob> blob,error;
     HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
     std::ofstream log(std::filesystem::path(logPath),std::ios::app);

@@ -4,7 +4,7 @@
 #include "src/Effects/DirectionalVolumetricLighting.h"
 #include "src/D3D9/TrackedRenderState.h"
 namespace distancefog {
-bool enabled=false,active=true,keyDown=false,showStatus=true,hotkey=true,effectEnabled=true;
+bool enabled=false,active=true,keyDown=false,showStatus=false,hotkey=true,effectEnabled=true;
 float distanceScale=1.2f,powerScale=1.08f;
 unsigned matches=0;
 std::wstring logPath;
@@ -14,7 +14,7 @@ void ReloadTuning(){effectEnabled=ReadTuning(L"Enabled",1)!=0;distanceScale=std:
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
     enabled=GetPrivateProfileIntW(L"DistanceFog",L"Enabled",0,mainIni.c_str())!=0;
-    showStatus=GetPrivateProfileIntW(L"DistanceFog",L"ShowStatus",1,mainIni.c_str())!=0;
+    showStatus=GetPrivateProfileIntW(L"DistanceFog",L"ShowStatus",0,mainIni.c_str())!=0;
     ReloadTuning();
     logPath=base+L"DistanceFog.log";
 }

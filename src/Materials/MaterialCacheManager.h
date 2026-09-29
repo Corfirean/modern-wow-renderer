@@ -76,7 +76,7 @@ namespace renderer
 
         bool m_enabled = true;
         bool m_active = true;
-        bool m_showStatus = true;
+        bool m_showStatus = false;
         bool m_toggleKeyDown = false;
         bool m_internalPass = false;
         float m_globalNormalStrength = 0.90f;
