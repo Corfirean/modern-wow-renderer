@@ -17,9 +17,15 @@ int main() try {
   int width=height*16/9;D3DPRESENT_PARAMETERS pp{};pp.Windowed=TRUE;pp.SwapEffect=D3DSWAPEFFECT_DISCARD;pp.hDeviceWindow=window;pp.BackBufferWidth=width;pp.BackBufferHeight=height;pp.BackBufferFormat=D3DFMT_A8R8G8B8;
   ComPtr<IDirect3DDevice9> device;Check(api->CreateDevice(0,D3DDEVTYPE_HAL,window,D3DCREATE_SOFTWARE_VERTEXPROCESSING,&pp,device.GetAddressOf()));
   tuningoverlay::visible=true;
+  renderer::locationtuning::Sync(L"",{571,65,4164,true},true);
+  if(!tuningoverlay::SelectScope(0)||!renderer::locationtuning::editZone)throw std::runtime_error("Cannot select zone editor");
+  if(!tuningoverlay::SelectScope(1)||renderer::locationtuning::editZone)throw std::runtime_error("Cannot select subarea editor");
+  renderer::locationtuning::Sync(L"",{571,65,0,true},true);
+  if(tuningoverlay::SelectScope(1))throw std::runtime_error("Area zero allowed subarea edit");
   for(int page=0;page<1;++page) {
    Check(device->Clear(0,nullptr,D3DCLEAR_TARGET,0xff354052,1,0));device->SetRenderState(D3DRS_CULLMODE,D3DCULL_CW);Check(device->BeginScene());tuningoverlay::Draw(device.Get());
    if(tuningoverlay::PanelY()+tuningoverlay::panelHeight>height)throw std::runtime_error("Panel clipped vertically");
+   if(tuningoverlay::HitScope(tuningoverlay::PanelX()+200*tuningoverlay::uiScale,tuningoverlay::PanelY()+140*tuningoverlay::uiScale)!=0||tuningoverlay::HitScope(tuningoverlay::PanelX()+700*tuningoverlay::uiScale,tuningoverlay::PanelY()+140*tuningoverlay::uiScale)!=1)throw std::runtime_error("Scope buttons cannot be reached");
    for(int index=0;index<int(tuningoverlay::items.size());++index)if(tuningoverlay::items[index].kind!=tuningoverlay::KIND_HEADER){
     int column=tuningoverlay::ItemColumn(index),row=index-tuningoverlay::ColumnStarts()[column];
     float px=tuningoverlay::PanelX()+(column*tuningoverlay::columnWidth+40)*tuningoverlay::uiScale;

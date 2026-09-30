@@ -6,6 +6,7 @@ namespace renderer::locationtuning {
 inline std::wstring baseFile, localFile;
 inline LocationContext active;
 inline bool editable=false;
+inline bool editZone=false;
 inline std::wstring Scope(unsigned level) {
     std::wstring result=L"Map."+std::to_wstring(active.mapId);
     if(level>=1)result+=L".Zone."+std::to_wstring(active.zoneId);
@@ -17,9 +18,9 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
     baseFile=base+L"GraphicsEffects.ini";localFile=base+L"LocationGraphics.ini";
     active=location;editable=location.valid&&verified;return changed;
 }
-inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
+inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel) {
     if(editable&&path&&baseFile==path) {
-        for(int level=active.areaId?2:1;level>=0;--level) {
+        for(int level=topLevel;level>=0;--level) {
             const auto scope=Scope(level)+L"."+section;
             wchar_t value[128]{};
             GetPrivateProfileStringW(scope.c_str(),key,L"",value,128,localFile.c_str());
@@ -28,13 +29,20 @@ inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR outp
     }
     return GetPrivateProfileStringW(section,key,fallback,output,size,path);
 }
+inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
+    return ReadAtLevel(section,key,fallback,output,size,path,active.areaId?2:1);
+}
+inline UINT ReadEditorInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
+    wchar_t value[128]{};ReadAtLevel(section,key,L"",value,128,path,editZone||!active.areaId?1:2);
+    return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
+}
 inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
     wchar_t value[128]{};ReadString(section,key,L"",value,128,path);
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
     if(!editable)return false;
-    const auto scope=Scope(active.areaId?2:1)+L"."+section;
+    const auto scope=Scope(editZone||!active.areaId?1:2)+L"."+section;
     return WritePrivateProfileStringW(scope.c_str(),key,std::to_wstring(value).c_str(),localFile.c_str())!=0;
 }
 }

@@ -22,6 +22,13 @@ int main() try {
  Require(locationtuning::Save(L"Atmosphere",L"ShaftPercent",20),"save separate instance preset");
  locationtuning::Sync(tuningBase,{571,65,4164,true},true);
  Require(locationtuning::ReadInt(L"Atmosphere",L"ShaftPercent",0,locationtuning::baseFile.c_str())==170,"return restores original outdoor preset");
+ locationtuning::editZone=true;
+ Require(locationtuning::Save(L"Atmosphere",L"ShaftPercent",90),"save whole zone while inside a subarea");
+ Require(locationtuning::ReadEditorInt(L"Atmosphere",L"ShaftPercent",0,locationtuning::baseFile.c_str())==90,"zone editor shows zone value instead of subarea override");
+ Require(locationtuning::ReadInt(L"Atmosphere",L"ShaftPercent",0,locationtuning::baseFile.c_str())==170,"runtime keeps explicit subarea override above zone");
+ locationtuning::Sync(tuningBase,{571,65,4165,true},true);
+ Require(locationtuning::ReadInt(L"Atmosphere",L"ShaftPercent",0,locationtuning::baseFile.c_str())==90,"sibling subarea inherits whole-zone slider edit");
+ locationtuning::editZone=false;
  Require(GetPrivateProfileIntW(L"Atmosphere",L"ShaftPercent",0,locationtuning::baseFile.c_str())==60,"local edits preserve shared graphics file");
  locationtuning::Sync(tuningBase,{530,10127,0,true},true);
  Require(locationtuning::Save(L"Water",L"Enabled",0),"zero area saves zone preset");

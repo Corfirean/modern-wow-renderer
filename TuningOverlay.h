@@ -105,7 +105,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35}
 };
 inline const std::vector<int> defaults=[](){std::vector<int> result;for(const auto& i:items)result.push_back(i.value);return result;}();
-inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);}}
+inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);}}
 inline void Save(Item& i){if(i.kind==KIND_HEADER)return;renderer::locationtuning::Save(i.section,i.key,i.value);}
 inline const std::array<unsigned char,7>& Glyph(char c){
  if(c>='a'&&c<='z')c=char(c-'a'+'A');
@@ -153,13 +153,13 @@ inline float panelHeight=0;
 inline int renderWidth=0,renderHeight=0;
 inline float PanelX(){return 24*uiScale;}
 inline float PanelY(){return 24*uiScale;}
-inline float ControlsY(){return PanelY()+142*uiScale;}
+inline float ControlsY(){return PanelY()+196*uiScale;}
 inline void Layout(int width,int height,HWND window){
  using GetDpi=UINT(WINAPI*)(HWND);
  auto getDpi=reinterpret_cast<GetDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow"));
  float dpi=getDpi&&window?getDpi(window)/96.f:1.f;
  const auto& starts=ColumnStarts();columnRows=std::max({starts[1]-starts[0],starts[2]-starts[1],starts[3]-starts[2]});
- const float logicalHeight=142+columnRows*controlRow+18;
+ const float logicalHeight=196+columnRows*controlRow+18;
  uiScale=std::clamp(std::max(height/1440.f,std::min(dpi,1.15f)),.85f,1.5f);
  uiScale=std::min(uiScale,std::min((width-48.f)/(columns*columnWidth),(height-48.f)/logicalHeight));
  uiScale=std::max(.5f,uiScale);
@@ -179,6 +179,19 @@ inline std::string CompactLabel(const Item& item){
  const auto hint=result.find(" (");if(hint!=result.npos)result.resize(hint);
  return result;
 }
+inline int HitScope(float px,float py){
+ if(py<PanelY()+132*uiScale||py>=PanelY()+157*uiScale)return -1;
+ const float local=(px-PanelX())/uiScale;
+ if(local>=155&&local<585)return 0;
+ if(local>=595&&local<1038)return 1;
+ return -1;
+}
+inline bool SelectScope(int scope){
+ if(!renderer::locationtuning::editable||scope<0||scope>1||(scope==1&&!renderer::locationtuning::active.areaId))return false;
+ renderer::locationtuning::editZone=scope==0;dragItem=-1;
+ for(auto& i:items)if(i.kind!=KIND_HEADER)i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);
+ return true;
+}
 inline bool Update(){
  DWORD pid=0;HWND window=GetForegroundWindow();GetWindowThreadProcessId(window,&pid);bool focused=pid==GetCurrentProcessId();
  bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;if(focused&&f7&&!f7Down)visible=!visible;f7Down=f7;
@@ -190,6 +203,7 @@ inline bool Update(){
  const float py=renderHeight&&client.bottom>0?float(p.y)*renderHeight/client.bottom:float(p.y);
  bool down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;bool changed=false;
  if(!down)dragItem=-1;
+ if(down&&!mouseDown&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));mouseDown=down;return false;}
  const int curHover=HitItem(px,py);
  hover=dragItem>=0?dragItem:curHover;
  if(down&&renderer::locationtuning::editable){
@@ -217,9 +231,17 @@ inline void Draw(IDirect3DDevice9* d){
  label(x+12*uiScale,y+5*uiScale,"Modern WoW Renderer",0xff8effbb,x+w);
  label(x+w-220*uiScale,y+5*uiScale,renderer::locationtuning::editable?"Local preset / F7 close":"Read only / F7 close",0xffb5cbd6,x+w-12*uiScale);
  for(size_t i=0;i<environmentLines.size();++i)label(x+12*uiScale,y+(36+23*i)*uiScale,environmentLines[i],i?0xffdce5ea:0xffffdc82,x+w-12*uiScale);
+ const auto& manager=renderer::EnvironmentProfileManager::Instance();
+ const bool zone=renderer::locationtuning::editZone||!renderer::locationtuning::active.areaId;
+ label(x+12*uiScale,y+135*uiScale,"\xd0\x9d\xd0\xb0\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd0\xba\xd0\xb8 \xd0\xb4\xd0\xbb\xd1\x8f:",0xffdce5ea,x+150*uiScale);
+ Rect(v,x+155*uiScale,y+132*uiScale,430*uiScale,25*uiScale,zone?0xff246b47:0xff26343b);
+ Rect(v,x+595*uiScale,y+132*uiScale,443*uiScale,25*uiScale,!zone?0xff246b47:0xff26343b);
+ label(x+162*uiScale,y+135*uiScale,"\xd0\x92\xd1\x81\xd0\xb5\xd0\xb9 \xd0\xb7\xd0\xbe\xd0\xbd\xd1\x8b - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
+ label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"\xd0\xad\xd1\x82\xd0\xbe\xd0\xb9 \xd0\xbf\xd0\xbe\xd0\xb4\xd0\xbb\xd0\xbe\xd0\xba\xd0\xb0\xd1\x86\xd0\xb8\xd0\xb8 - "+manager.AreaName():"\xd0\x9f\xd0\xbe\xd0\xb4\xd0\xbb\xd0\xbe\xd0\xba\xd0\xb0\xd1\x86\xd0\xb8\xd1\x8f \xd0\xbd\xd0\xb5\xd0\xb4\xd0\xbe\xd1\x81\xd1\x82\xd1\x83\xd0\xbf\xd0\xbd\xd0\xb0 (Area 0)",0xffdce5ea,x+w-12*uiScale);
+ label(x+12*uiScale,y+165*uiScale,"\xd0\x9d\xd0\xb0\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd0\xba\xd0\xb8 \xd0\xbf\xd0\xbe\xd0\xb4\xd0\xbb\xd0\xbe\xd0\xba\xd0\xb0\xd1\x86\xd0\xb8\xd0\xb8 \xd0\xb8\xd0\xbc\xd0\xb5\xd1\x8e\xd1\x82 \xd0\xbf\xd1\x80\xd0\xb8\xd0\xbe\xd1\x80\xd0\xb8\xd1\x82\xd0\xb5\xd1\x82 \xd0\xbd\xd0\xb0\xd0\xb4 \xd0\xbd\xd0\xb0\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd0\xba\xd0\xb0\xd0\xbc\xd0\xb8 \xd0\xb7\xd0\xbe\xd0\xbd\xd1\x8b.",0xffb5cbd6,x+w-12*uiScale);
  for(int column=0;column<columns;++column){
   float xx=x+column*columnWidth*uiScale;
-  if(column)Rect(v,xx-2*uiScale,ControlsY(),uiScale,panelHeight-142*uiScale,0xff2a3d48);
+  if(column)Rect(v,xx-2*uiScale,ControlsY(),uiScale,panelHeight-196*uiScale,0xff2a3d48);
   for(int n=0;n<columnRows;++n){
    const int index=ColumnStarts()[column]+n;if(index>=ColumnStarts()[column+1])break;
    auto& i=items[index];float yy=ControlsY()+n*row;
