@@ -103,6 +103,10 @@ int main() try {
  auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
  auto diff=[](DWORD a,DWORD b){int m=0;for(int s=0;s<24;s+=8)m=std::max(m,abs(int((a>>s)&255)-int((b>>s)&255)));return m;};
  encode(120,1);DWORD standard=render(true);Require(diff(standard,0xff202020)>8,"fog visible on first resource creation");
+ const float baseDensity=settings.densityScale;
+ f.environment.values[FogDensity]=0;
+ Require(render(true)==0xff202020&&settings.densityScale==baseDensity,"environment fog multiplier affects GPU without mutating base settings");
+ f.environment={};
  encode(120,.94f);DWORD compressed=render(true);printf("fog z=120 standard=%08lx compressed=%08lx\n",standard,compressed);Require(diff(standard,compressed)<=2,"viewport MaxZ=.94 matches MaxZ=1");
  encode(120,.94f,.1f);Require(diff(standard,render(true))<=2,"nonzero viewport MinZ");
  Require(render(false)==0xff202020,"both fog layers off preserve scene");

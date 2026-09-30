@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include <windows.h>
 #include <d3d9.h>
@@ -268,14 +269,14 @@ inline void Log(const char* s)
 inline int ReadTuningInt(const wchar_t* key, int fallback)
 {
     wchar_t value[64]{};
-    GetPrivateProfileStringW(L"WeatherVisuals", key, L"", value, std::size(value), tuningIni.c_str());
-    return value[0] ? int(wcstol(value, nullptr, 10)) : GetPrivateProfileIntW(L"WeatherVisuals", key, fallback, mainIni.c_str());
+    renderer::locationtuning::ReadString(L"WeatherVisuals", key, L"", value, std::size(value), tuningIni.c_str());
+    return value[0] ? int(wcstol(value, nullptr, 10)) : renderer::locationtuning::ReadInt(L"WeatherVisuals", key, fallback, mainIni.c_str());
 }
 
 inline float ReadTuningFloat(const wchar_t* key, float fallback)
 {
     wchar_t value[64]{};
-    GetPrivateProfileStringW(L"WeatherVisuals", key, L"", value, std::size(value), tuningIni.c_str());
+    renderer::locationtuning::ReadString(L"WeatherVisuals", key, L"", value, std::size(value), tuningIni.c_str());
     return value[0] ? float(wcstod(value, nullptr)) : fallback;
 }
 
@@ -478,7 +479,7 @@ inline void Configure(const std::wstring& base)
     mainIni = base + L"ModernWoWRenderer.ini";
     tuningIni = base + L"GraphicsEffects.ini";
     logPath = base + L"WeatherVisuals.log";
-    enabled = GetPrivateProfileIntW(L"WeatherVisuals", L"Enabled", 1, mainIni.c_str()) != 0;
+    enabled = renderer::locationtuning::ReadInt(L"WeatherVisuals", L"Enabled", 1, mainIni.c_str()) != 0;
     ReloadTuning();
     lastTick = GetTickCount();
 }
@@ -609,7 +610,7 @@ public:
         internal = true;
         device->GetPixelShader(m_originalPS.GetAddressOf());
         device->GetPixelShaderConstantF(0, m_originalC0, 1);
-        const float alphaScale = intensity * (detected == 2 ? 1.55f : (detected == 3 ? 0.48f : 0.70f));
+        const float alphaScale = intensity * renderer::FrameContext::Current().environment[renderer::Weather] * (detected == 2 ? 1.55f : (detected == 3 ? 0.48f : 0.70f));
         const float params[4] = {
             detected == 2 ? 0.96f : (detected == 3 ? 0.78f : 0.90f),
             detected == 2 ? 0.98f : (detected == 3 ? 0.67f : 0.90f),
@@ -731,7 +732,7 @@ inline void BeforeDraw(IDirect3DDevice9* device)
     // c1: Weather params
     // A restrained layer supplements native particles rather than doubling
     // their density. It remains camera-relative, so mount speed cannot outrun it.
-    float weatherConst[4] = { elapsedTime, intensity * .45f, float(renderMode), speed };
+    float weatherConst[4] = { elapsedTime, intensity * renderer::FrameContext::Current().environment[renderer::Weather] * .45f, float(renderMode), speed };
     // c2: Wind params
     float windConst[4] = { windX, windY, atmosphereHaze, smoothedIndoor };
     // c3: Screen params

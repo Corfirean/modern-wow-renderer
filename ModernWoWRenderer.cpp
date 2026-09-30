@@ -145,11 +145,16 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 }
 
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
+    renderer::EnvironmentProfileManager::Instance().Update(GetTickCount64(),renderer::FrameContext::Current().cameraValid && renderer::FrameContext::Current().depthAvailable);
+    renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();
     volume::Present(d);
     renderer::MaterialCacheManager::Instance().Present(d);
     weathervisuals::Present(d,tuningoverlay::visible);
-    if(tuningoverlay::Update()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("F7 overlay changed GraphicsEffects.ini");}
+    const auto& environmentManager=renderer::EnvironmentProfileManager::Instance();
+    const bool locationTuningChanged=renderer::locationtuning::Sync(g_basePath,environmentManager.Location(),environmentManager.LocationTuningVerified());
+    if(locationTuningChanged)tuningoverlay::Configure(g_basePath);
+    if(tuningoverlay::Update()||locationTuningChanged){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("Location tuning reloaded");}
     if(unified){
         bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
         if(down&&!graphicsKeyDown&&pid==GetCurrentProcessId()){
@@ -160,7 +165,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     }
     {
         bool down=(GetAsyncKeyState(VK_F12)&0x8000)!=0;DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();Log("F12 reloaded GraphicsEffects.ini");}
+        if(down&&!tuningKeyDown&&pid==GetCurrentProcessId()){watereffect::ReloadTuning();distancefog::ReloadTuning();volume::ReloadTuning();celestialhighlight::ReloadTuning(g_basePath);nativeshadowdiag::ReloadEnhancement();renderer::MaterialCacheManager::Instance().ReloadTuning(g_basePath);renderer::LocalLightManager::Instance().ReloadTuning();weathervisuals::ReloadTuning();renderer::EnvironmentProfileManager::Instance().Reload();tuningoverlay::Configure(g_basePath);Log("F12 reloaded GraphicsEffects.ini and EnvironmentProfiles.ini");}
         tuningKeyDown=down;
     }
     waterhighlight::Present();
@@ -173,6 +178,7 @@ HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWN
     return originalPresent(d,a,b,w,r);
 }
 HRESULT WINAPI HookedReset(IDirect3DDevice9* d,D3DPRESENT_PARAMETERS* p) {
+    tuningoverlay::font.Reset();
     waterreflection::Reset(d);
     volume::Reset(d);
     watereffect::Reset(d);
@@ -616,6 +622,7 @@ void Initialize()
     weathervisuals::Configure(g_basePath);
     waterreflection::Configure(g_basePath);
     tuningoverlay::Configure(g_basePath);
+    renderer::EnvironmentProfileManager::Instance().Configure(g_basePath);
     nativeshadowdiag::Configure(g_basePath);
     renderer::MaterialCacheManager::Instance().Configure(g_basePath);
     renderer::LocalLightManager::Instance().Configure(g_basePath);

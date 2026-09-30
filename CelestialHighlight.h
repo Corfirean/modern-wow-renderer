@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include <d3dcompiler.h>
 #include <wrl/client.h>
@@ -44,7 +45,7 @@ void Configure(const std::wstring&) {
 }
 void ReloadTuning(const std::wstring& base) {
     auto ini=base+L"GraphicsEffects.ini";
-    enabled=GetPrivateProfileIntW(L"Atmosphere",L"DebugCelestialCandidateHighlight",0,ini.c_str())!=0;
+    enabled=renderer::locationtuning::ReadInt(L"Atmosphere",L"DebugCelestialCandidateHighlight",0,ini.c_str())!=0;
 }
 
 struct Scope {

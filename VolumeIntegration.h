@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include "NativeShadowDiagnostics.h"
 #include "VolumeEffects.h"
@@ -136,8 +137,8 @@ std::wstring mainIni, tuningIni;
 void Log(const char* s) { std::ofstream(std::filesystem::path(logPath), std::ios::app) << s << '\n'; }
 int ReadTuning(const wchar_t* key, int fallback, const wchar_t* section = L"Atmosphere") {
     wchar_t value[64]{};
-    GetPrivateProfileStringW(section, key, L"", value, std::size(value), tuningIni.c_str());
-    return value[0] ? int(wcstol(value, nullptr, 10)) : GetPrivateProfileIntW(section, key, fallback, mainIni.c_str());
+    renderer::locationtuning::ReadString(section, key, L"", value, std::size(value), tuningIni.c_str());
+    return value[0] ? int(wcstol(value, nullptr, 10)) : renderer::locationtuning::ReadInt(section, key, fallback, mainIni.c_str());
 }
 
 bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
@@ -326,7 +327,7 @@ void Configure(const std::wstring& base) {
     celestialProbeLogPath = base + L"CelestialProbe.log";
     renderer::PerformanceProfiler::Instance().SetLogPath(logPath);
     renderer::DirectionalVolumetricLighting::Instance().Configure(base);
-    enabled = GetPrivateProfileIntW(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
+    enabled = renderer::locationtuning::ReadInt(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
     ReloadTuning();
 }
 
@@ -768,7 +769,7 @@ bool Composite(IDirect3DDevice9* d) {
         if (body) {
             constants[2][0] = body->screenX;
             constants[2][1] = body->screenY;
-            constants[2][2] = useSun ? strength : strength * moonStrength;
+            constants[2][2] = (useSun ? strength : strength * moonStrength) * frameCtx.environment[renderer::Rays];
             constants[10][0] = body->viewSpaceDirection.x;
             constants[10][1] = body->viewSpaceDirection.y;
             constants[10][2] = body->viewSpaceDirection.z;

@@ -2,6 +2,7 @@
 #include <d3d9.h>
 #include <cstdint>
 #include "MathTypes.h"
+#include "../Environment/EnvironmentProfile.h"
 
 namespace renderer
 {
@@ -9,6 +10,7 @@ namespace renderer
     {
         static FrameContext& Current();
 
+        ResolvedEnvironmentState environment;
         uint64_t frameIndex = 0;
         IDirect3DDevice9* device = nullptr;
 

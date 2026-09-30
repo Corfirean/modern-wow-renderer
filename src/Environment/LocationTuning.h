@@ -1,0 +1,40 @@
+#pragma once
+#include <windows.h>
+#include <string>
+#include "LocationContext.h"
+namespace renderer::locationtuning {
+inline std::wstring baseFile, localFile;
+inline LocationContext active;
+inline bool editable=false;
+inline std::wstring Scope(unsigned level) {
+    std::wstring result=L"Map."+std::to_wstring(active.mapId);
+    if(level>=1)result+=L".Zone."+std::to_wstring(active.zoneId);
+    if(level>=2)result+=L".Area."+std::to_wstring(active.areaId);
+    return result;
+}
+inline bool Sync(const std::wstring& base,const LocationContext& location,bool verified) {
+    const bool changed=!active.SamePlace(location)||editable!=(location.valid&&verified)||baseFile!=base+L"GraphicsEffects.ini";
+    baseFile=base+L"GraphicsEffects.ini";localFile=base+L"LocationGraphics.ini";
+    active=location;editable=location.valid&&verified;return changed;
+}
+inline DWORD ReadString(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path) {
+    if(editable&&path&&baseFile==path) {
+        for(int level=active.areaId?2:1;level>=0;--level) {
+            const auto scope=Scope(level)+L"."+section;
+            wchar_t value[128]{};
+            GetPrivateProfileStringW(scope.c_str(),key,L"",value,128,localFile.c_str());
+            if(value[0])return GetPrivateProfileStringW(scope.c_str(),key,fallback,output,size,localFile.c_str());
+        }
+    }
+    return GetPrivateProfileStringW(section,key,fallback,output,size,path);
+}
+inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
+    wchar_t value[128]{};ReadString(section,key,L"",value,128,path);
+    return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
+}
+inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
+    if(!editable)return false;
+    const auto scope=Scope(active.areaId?2:1)+L"."+section;
+    return WritePrivateProfileStringW(scope.c_str(),key,std::to_wstring(value).c_str(),localFile.c_str())!=0;
+}
+}

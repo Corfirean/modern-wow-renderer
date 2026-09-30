@@ -231,7 +231,7 @@ bool LocalLightingRenderer::Render(IDirect3DDevice9* device, FrameContext& f)
     const int count = std::min<int>(maxLights, int(lights.size()));
     const int occluded = std::min(count, manager.Quality() <= 0 ? 2 : 4);
     const float texel[4] = { 1.f / desc.Width,1.f / desc.Height,float(count),float(occluded) };
-    const float tuning[4] = { manager.IntensityScale(),float(manager.DebugMode()),0,0 };
+    const float tuning[4] = { manager.IntensityScale()*f.environment[Lighting],float(manager.DebugMode()),0,0 };
     float pos[8][4]{}, color[8][4]{}, direction[8][4]{};
     for (int i = 0; i < count; ++i)
     {
