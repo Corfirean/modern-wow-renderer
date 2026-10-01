@@ -1,3 +1,4 @@
+#include "../Environment/LocationTuning.h"
 #include "LocalLightManager.h"
 #include <algorithm>
 #include <cmath>
@@ -41,11 +42,11 @@ namespace renderer
 
     void LocalLightManager::ReloadTuning()
     {
-        m_enabled = GetPrivateProfileIntW(L"DynamicLighting", L"Enabled", 1, m_iniPath.c_str()) != 0;
-        m_intensityScale = std::clamp(int(GetPrivateProfileIntW(L"DynamicLighting", L"IntensityPercent", 100, m_iniPath.c_str())), 0, 250) * 0.01f;
-        m_rayScale = std::clamp(int(GetPrivateProfileIntW(L"DynamicLighting", L"RayPercent", 75, m_iniPath.c_str())), 0, 200) * 0.01f;
-        m_quality = std::clamp(int(GetPrivateProfileIntW(L"DynamicLighting", L"Quality", 1, m_iniPath.c_str())), 0, 2);
-        m_debugMode = std::clamp(int(GetPrivateProfileIntW(L"DynamicLighting", L"DebugMode", 0, m_iniPath.c_str())), 0, 4);
+        m_enabled = renderer::locationtuning::ReadInt(L"DynamicLighting", L"Enabled", 1, m_iniPath.c_str()) != 0;
+        m_intensityScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"IntensityPercent", 100, m_iniPath.c_str())), 0, 250) * 0.01f;
+        m_rayScale = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"RayPercent", 75, m_iniPath.c_str())), 0, 200) * 0.01f;
+        m_quality = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"Quality", 1, m_iniPath.c_str())), 0, 2);
+        m_debugMode = std::clamp(int(renderer::locationtuning::ReadInt(L"DynamicLighting", L"DebugMode", 0, m_iniPath.c_str())), 0, 4);
     }
 
     void LocalLightManager::Reset()

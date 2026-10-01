@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include <wrl/client.h>
 #include "src/Core/ShaderCache.h"
@@ -9,12 +10,12 @@ float distanceScale=1.2f,powerScale=1.08f;
 unsigned matches=0;
 std::wstring logPath;
 std::wstring mainIni,tuningIni;
-int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};GetPrivateProfileStringW(L"DistanceFog",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):GetPrivateProfileIntW(L"DistanceFog",key,fallback,mainIni.c_str());}
+int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};renderer::locationtuning::ReadString(L"DistanceFog",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):renderer::locationtuning::ReadInt(L"DistanceFog",key,fallback,mainIni.c_str());}
 void ReloadTuning(){effectEnabled=ReadTuning(L"Enabled",1)!=0;distanceScale=std::clamp(ReadTuning(L"DistancePercent",120),10,300)*.01f;powerScale=std::clamp(ReadTuning(L"PowerPercent",108),10,300)*.01f;if(!logPath.empty())std::ofstream(std::filesystem::path(logPath),std::ios::app)<<"tuning enabled="<<effectEnabled<<" distance="<<distanceScale<<" power="<<powerScale<<'\n';}
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
-    enabled=GetPrivateProfileIntW(L"DistanceFog",L"Enabled",0,mainIni.c_str())!=0;
-    showStatus=GetPrivateProfileIntW(L"DistanceFog",L"ShowStatus",0,mainIni.c_str())!=0;
+    enabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",0,mainIni.c_str())!=0;
+    showStatus=renderer::locationtuning::ReadInt(L"DistanceFog",L"ShowStatus",0,mainIni.c_str())!=0;
     ReloadTuning();
     logPath=base+L"DistanceFog.log";
 }
@@ -47,7 +48,7 @@ struct Scope {
             if(FAILED(d->GetVertexShaderConstantF(reg,original,1)))return;
             for(float f:original)if(!std::isfinite(f))return;
             if(original[0]>0||original[1]<0||original[2]<=0)return;
-            float modified[]={original[0]*distanceScale,original[1],original[2]*powerScale,original[3]};
+            float modified[]={original[0]*distanceScale,original[1],original[2]*powerScale*renderer::FrameContext::Current().environment[renderer::DistanceFogPower],original[3]};
             if(FAILED(d->SetVertexShaderConstantF(reg,modified,1)))return;
             device=d;++matches;
             static bool logged=false;

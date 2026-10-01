@@ -13,7 +13,7 @@ void TestLocalFogField(IDirect3DDevice9* d)
  auto begin=text.find(marker);Require(begin!=std::string::npos,"field shader source found");begin+=marker.size();
  auto source=text.substr(begin,text.find(")HLSL\";",begin)-begin);
  ComPtr<ID3DBlob> code,errors,assembly;ComPtr<IDirect3DPixelShader9> shader;
- Check(D3DCompile(source.data(),source.size(),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,code.GetAddressOf(),errors.GetAddressOf()));
+ HRESULT compileResult=D3DCompile(source.data(),source.size(),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,code.GetAddressOf(),errors.GetAddressOf());if(FAILED(compileResult)&&errors)printf("%s\n",static_cast<char*>(errors->GetBufferPointer()));Check(compileResult);
  Check(d->CreatePixelShader(static_cast<DWORD*>(code->GetBufferPointer()),shader.GetAddressOf()));
  Check(D3DDisassemble(code->GetBufferPointer(),code->GetBufferSize(),0,nullptr,assembly.GetAddressOf()));
  std::string listing(static_cast<char*>(assembly->GetBufferPointer()),assembly->GetBufferSize());

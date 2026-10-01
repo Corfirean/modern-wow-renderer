@@ -1,3 +1,4 @@
+#include "../Environment/LocationTuning.h"
 #include "DirectionalVolumetricLighting.h"
 #include <d3dcompiler.h>
 #include <algorithm>
@@ -116,25 +117,35 @@ const char* kLocalFogFieldSource = R"HLSL(
 sampler2D noiseMap:register(s0); sampler2D groundState:register(s1);
 float4 wakeShape:register(c1); // radius, trail length, strength
 float4 fieldOrigin:register(c0); // lower-left XY, extent, time
-float Density(float2 world,float height) {
+float Noise3(float3 p) {
+ // Smooth interpolation between decorrelated height slices in the noise atlas.
+ float z=floor(p.z),f=frac(p.z);f=f*f*(3-2*f);
+ float2 offset=float2(.173,.317);
+ float a=tex2Dlod(noiseMap,float4(p.xy+z*offset,0,0)).r;
+ float b=tex2Dlod(noiseMap,float4(p.xy+(z+1)*offset,0,0)).r;
+ return lerp(a,b,f);
+}
+float Bank(float3 p,float center,float thickness,float seed) {
  float t=fieldOrigin.w;
- float2 q=world/42+float2(-.013,.008)*t;
- float2 bend=float2(sin(q.y*2.1+t*.19+height*2),cos(q.x*1.7-t*.16-height*1.6));
- float2 warp=tex2Dlod(noiseMap,float4(q*.63+bend*.13+height*.19,0,0)).rg-.5;
- float2 domain=q+warp*.65+bend*.17;
- float broad=tex2Dlod(noiseMap,float4(domain+height*float2(.31,-.23),0,0)).r;
- float detail=tex2Dlod(noiseMap,float4(domain*3.23+float2(.009,-.014)*t+height*float2(-.7,.51),0,0)).g;
- float erosion=tex2Dlod(noiseMap,float4(domain*6.7-warp*.8+float2(-.017,-.011)*t+height*.83,0,0)).r;
- float bank=smoothstep(.30,.78,broad*.68+detail*.32);
- // Dense feet, rolling shoulders and eroded tops, with clear gaps between banks.
- float thickness=lerp(.48,.8,bank);
- float profile=exp(-2*height*height/(thickness*thickness));
- float edge=saturate(bank-(1-erosion)*height*.42);
- return saturate(edge*edge*profile);
+ float3 flow=float3(t*.003,-t*.002,t*.004);
+ float broad=Noise3(p+flow+seed);
+ float detail=Noise3(p*2.13-flow*.63+seed+.37);
+ float shape=smoothstep(.28,.72,broad*.78+detail*.22);
+ float top=center+(detail-.5)*.3;
+ return shape*exp(-2*(p.z-top)*(p.z-top)/(thickness*thickness));
+}
+float Density(float2 world,float height) {
+ // Independent overlapping volumes: changing flow deforms bridges between banks.
+ float3 p=float3(world/42,height);
+ float low=Bank(p,0,.65,0);
+ float middle=Bank(float3(p.xy*1.37,p.z),.48,.62,31.4);
+ float upper=Bank(float3(p.xy*.73,p.z),.95,.58,67.9);
+ return 1-exp(-(low*.85+middle*.65+upper*.4)*1.25);
 }
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 world=fieldOrigin.xy+uv*fieldOrigin.z;
- float4 density=float4(Density(world,0),Density(world,.5),Density(world,1),Density(world,1.5));
+ float4 density=0;
+ [loop]for(int slice=0;slice<4;++slice){float v=Density(world,slice*.5);density+=v*float4(slice==0,slice==1,slice==2,slice==3);}
  float4 actor=tex2Dlod(groundState,float4(.25,.5,0,0));
  float2 velocity=tex2Dlod(groundState,float4(.75,.5,0,0)).xy;
  float2 rel=world-actor.xy,flowDir=normalize(velocity+float2(1e-4,0));
@@ -205,7 +216,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float screenPhase=(phaseTuning.z*wideHalo+phaseTuning.w*forwardHalo)*sourceScreen.w;
  float directionalLean=pow(saturate(cosTheta*.5+.5),6)*.08;
  float discProtection=lerp(.06,1,smoothstep(.025,.055,sourceRadius));
- float phase=(screenPhase*.55+directionalLean)*discProtection;
+ // Normalized forward phase, bounded for artistic intensity and half-float stability.
+ float g=.62;
+ float angular=(1-g*g)/pow(max(1+g*g-2*g*cosTheta,.04),1.5);
+ float phase=(angular*.12*phaseTuning.z+screenPhase*.12+directionalLean*.25)*discProtection;
 
  // The horizon layer is analytic and therefore cannot disappear because a
  // raymarch missed the ground. Density changes its strength while distance
@@ -275,19 +289,19 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    float edge=saturate(1-perpendicular2/(radius*radius));
    float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
    float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
-   localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
+   localLightSum+=pow(max(localLightColorPower[li].rgb,0),2.2)*localLightColorPower[li].w*scatter*transmission;
  }
  float optical=max(0,globalOptical+heightOptical+localOptical)*directExtinction.w;
  float T=exp(-optical); float fogAmount=1-T;
  float day=saturate(layerEnable.z),moon=saturate(layerEnable.w);
- float3 neutralFog=lerp(float3(.15,.19,.24),ambientAerial.rgb,saturate(day+moon*.35));
+ float3 neutralFog=pow(max(ambientAerial.rgb,0),2.2)*lerp(.55,1,saturate(day+moon*.65));
  // Global wash controls distant haze only. Ground banks retain their own
  // neutral ambient scattering, including at night and away from lamps.
  float localAmount=1-exp(-max(0,localOptical)*directExtinction.w);
  float globalAmount=(1-exp(-max(0,globalOptical+heightOptical)*directExtinction.w))*frameTuning.z;
  T=(1-globalAmount)*(1-localAmount);
- float3 ambientSum=neutralFog*globalAmount*(1-localAmount)+float3(.72,.74,.76)*localAmount;
- float3 directSum=directExtinction.rgb*phase*celestial.w*fogAmount*frameTuning.z;
+ float3 ambientSum=neutralFog*(globalAmount*(1-localAmount)+localAmount);
+ float3 directSum=pow(max(directExtinction.rgb,0),2.2)*phase*celestial.w*fogAmount*frameTuning.z;
  // Light Rays controls lamp scattering independently of global Fog Wash.
  float invCount=1/max((float)count,1); int debugMode=(int)frameTuning.y;
  if(debugMode==1)return optical.xxxx; if(debugMode==2)return T.xxxx;
@@ -394,7 +408,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float T=saturate(1-a.a);
  float wash=tuning.y;
  float extinctionAmt=lerp(1.0,T,saturate(wash*tuning.z));
- float3 result=scene.rgb*extinctionAmt+a.rgb*wash*tuning.w;
+ float3 sceneLinear=pow(max(scene.rgb,0),2.2);
+ float3 scattering=max(a.rgb*wash*tuning.w,0);
+ // Compress added radiance using the remaining display headroom. At zero fog
+ // the scene is exactly preserved; bright scatter approaches white smoothly.
+ float3 transmitted=sceneLinear*extinctionAmt;
+ float3 headroom=max(1-transmitted,.02);
+ float3 result=transmitted+headroom*(1-exp(-scattering/headroom));
  float depth=tex2D(depthMap,uv).r;
  float edgeDistance=depth>=.9999?max(projection.z,edgeTuning.x*2):Linear(depth);
  float edge=saturate((edgeDistance-edgeTuning.x)/max(edgeTuning.x*.65,1));
@@ -402,7 +422,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float3 skyRay=normalize(float3((uv.x*2-1)/edgeProjection.x,(1-uv.y*2)/edgeProjection.y,1));
  float horizon=saturate(1-abs(dot(skyRay,worldUp.xyz))*2);
  edge*=depth>=.9999?horizon*horizon:1;
- result=lerp(result,edgeColor.rgb,edge);
+ result=lerp(result,pow(max(edgeColor.rgb,0),2.2),edge);
  // Boundary depth already clips the air integration to the water surface.
  // Preserve the game's own sun disc luminance. Atmosphere supplies the halo,
  // not a second emitter painted over the sprite. The sky-depth gate prevents
@@ -410,7 +430,8 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 delta=float2((uv.x-sourceScreen.x)*sourceScreen.z,uv.y-sourceScreen.y);
  float disc=(1-smoothstep(.022,.045,length(delta)))*sourceScreen.w;
  disc*=smoothstep(.9985,.9999,tex2D(depthMap,uv).r);
- result=lerp(result,scene.rgb,disc);
+ result=lerp(result,sceneLinear,disc);
+ result=pow(max(result,0),1/2.2);
  // No water-specific handling here any more. The integrate/upsample/
  // temporal pipeline now marches air only down to the water SURFACE (see
  // kBoundarySource), not the seabed, so its output over water is already
@@ -433,7 +454,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
 {
  const std::wstring ini=basePath+L"GraphicsEffects.ini";
  m_logPath=basePath+L"Atmosphere.log";
- auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(GetPrivateProfileIntW(L"Atmosphere",key,fallback,ini.c_str()));};
+ auto read=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"Atmosphere",key,fallback,ini.c_str()));};
  m_settings.enabled=read(L"DirectionalVolumetricEnabled",1)!=0;
  m_settings.quality=static_cast<uint32_t>(std::clamp(read(L"AtmosphereQuality",1),0,2));
  static constexpr uint32_t samples[]={12,16,24}; static constexpr float scales[]={.25f,.25f,.5f};
@@ -474,7 +495,7 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  // more zones. The toggle in the overlay still works for testing it.
  m_settings.useEnvironmentBaseline=read(L"UseEnvironmentFog",0)!=0;
  m_settings.debugMode=static_cast<VolumetricDebugMode>(std::clamp(read(L"AtmosphereDebugMode",0),0,12));
- const auto readLocal=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(GetPrivateProfileIntW(L"LocalFog",key,fallback,ini.c_str()));};
+ const auto readLocal=[&](const wchar_t* key,int fallback)->int{return static_cast<int>(renderer::locationtuning::ReadInt(L"LocalFog",key,fallback,ini.c_str()));};
  m_settings.localFogEnabled=readLocal(L"Enabled",1)!=0;
  m_settings.localFogDensity=std::clamp(readLocal(L"DensityPermille",12),0,100)*.003f;
  // Height is now a real thickness in world units: higher means taller.
@@ -483,9 +504,9 @@ void DirectionalVolumetricLighting::Configure(const std::wstring& basePath)
  m_settings.localFogWakeStrength=std::clamp(readLocal(L"WakeStrengthPercent",85),0,150)*.01f;
  m_settings.localFogWakeRadius=float(std::clamp(readLocal(L"WakeRadius",5),2,14));
  m_settings.localFogTrailLength=float(std::clamp(readLocal(L"TrailLength",18),4,40));
- m_settings.edgeFogEnabled=GetPrivateProfileIntW(L"DistanceFog",L"Enabled",1,ini.c_str())!=0;
- m_settings.edgeFogDistance=float(std::clamp(int(GetPrivateProfileIntW(L"DistanceFog",L"DistancePercent",130,ini.c_str())),10,300));
- m_settings.edgeFogPower=std::clamp(int(GetPrivateProfileIntW(L"DistanceFog",L"PowerPercent",30,ini.c_str())),10,300)*.01f;
+ m_settings.edgeFogEnabled=renderer::locationtuning::ReadInt(L"DistanceFog",L"Enabled",1,ini.c_str())!=0;
+ m_settings.edgeFogDistance=float(std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"DistancePercent",130,ini.c_str())),10,300));
+ m_settings.edgeFogPower=std::clamp(int(renderer::locationtuning::ReadInt(L"DistanceFog",L"PowerPercent",30,ini.c_str())),10,300)*.01f;
  m_historyValid=false;
 }
 
@@ -547,17 +568,22 @@ bool DirectionalVolumetricLighting::ValidateHistory(const FrameContext& f)
 
 bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContext& f,IDirect3DSurface9* target,bool globalFogEnabled)
 {
- if(!m_settings.enabled||!d||!target||!f.cameraValid||!f.depthAvailable||!f.sceneColor||!f.atmosphereNoise)return false;
+ auto settings=m_settings;
+ settings.densityScale*=f.environment[FogDensity];
+ settings.localFogDensity*=f.environment[LocalFog];
+ settings.scatterStrength*=f.environment[Atmosphere];
+ settings.edgeFogPower*=f.environment[DistanceFogPower];
+ if(!settings.enabled||!d||!target||!f.cameraValid||!f.depthAvailable||!f.sceneColor||!f.atmosphereNoise)return false;
  // Resource recreation resets shaders too; compile only after that reset.
  D3DSURFACE_DESC desc{};if(FAILED(target->GetDesc(&desc))||!EnsureResources(d,desc.Width,desc.Height,desc.Format)||!EnsureShaders(d))return false;
  if((++m_renderFrames%300)==0&&!m_logPath.empty()){
   std::ofstream out(std::filesystem::path(m_logPath),std::ios::app);
   out<<"render camera=("<<f.cameraPosition.x<<','<<f.cameraPosition.y<<','<<f.cameraPosition.z
-     <<") densityScale="<<m_settings.densityScale<<" aerial="<<m_settings.aerialDensity
-     <<" height="<<m_settings.heightDensity<<" mist="<<m_settings.mistDensity
-     <<" localEnabled="<<(m_settings.localFogEnabled?1:0)<<" local="<<m_settings.localFogDensity
+     <<") densityScale="<<settings.densityScale<<" aerial="<<settings.aerialDensity
+     <<" height="<<settings.heightDensity<<" mist="<<settings.mistDensity
+     <<" localEnabled="<<(settings.localFogEnabled?1:0)<<" local="<<settings.localFogDensity
      <<" groundAtlas="<<(GroundSurfaceCapture::Instance().Texture()?1:0)<<" fogTime="<<m_fogElapsed
-     <<" wash="<<m_settings.fogWash<<" selectedLights="<<LocalLightManager::Instance().Selected().size()<<'\n';
+     <<" wash="<<settings.fogWash<<" selectedLights="<<LocalLightManager::Instance().Selected().size()<<'\n';
  }
  ScopedRenderState state(d);
  DepthCapture::Instance().RawSetDepth(d,nullptr);
@@ -573,10 +599,10 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  // identity (Elwynn vs a coastal fog bank) comes through instead of one
  // fixed synthetic profile everywhere.
  const auto& envFog=renderer::EnvironmentFogCapture::Instance().State();
- bool useEnv=m_settings.useEnvironmentBaseline&&envFog.valid;
- float envScale=m_settings.maxDistance/520.f;
- float aerialStart=useEnv?envFog.startDistance*envScale:m_settings.aerialStart;
- float aerialEnd=useEnv?envFog.endDistance*envScale:m_settings.maxDistance;
+ bool useEnv=settings.useEnvironmentBaseline&&envFog.valid;
+ float envScale=settings.maxDistance/520.f;
+ float aerialStart=useEnv?envFog.startDistance*envScale:settings.aerialStart;
+ float aerialEnd=useEnv?envFog.endDistance*envScale:settings.maxDistance;
  aerialEnd=std::max(aerialEnd,aerialStart+10.f);
  float ambR=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[0]:.36f;
  float ambG=(useEnv&&envFog.colorValid)?envFog.ambientFogColor[1]:.46f;
@@ -616,7 +642,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   DrawScreenQuad(d,2,1);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);
   m_groundHeightIssued[groundWrite]=true;m_groundHeightWriteIndex=groundRead;d->SetViewport(&full);
  }
- if(m_settings.debugMode==VolumetricDebugMode::BoundaryDepth){
+ if(settings.debugMode==VolumetricDebugMode::BoundaryDepth){
   d->SetRenderTarget(0,target);d->SetPixelShader(m_boundaryDebugShader.Get());d->SetTexture(0,m_boundaryTexture.Get());
   d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(0,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
   float c0[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,c0,1);
@@ -626,7 +652,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
  // Snap to whole field texels so camera motion never swims the density grid.
  float field[4]={std::floor(f.cameraPosition.x)-kLocalFogFieldExtent*.5f,
                  std::floor(f.cameraPosition.y)-kLocalFogFieldExtent*.5f,kLocalFogFieldExtent,m_fogElapsed};
- if(m_settings.localFogEnabled && m_settings.localFogDensity>0){
+ if(settings.localFogEnabled && settings.localFogDensity>0){
   d->SetRenderTarget(0,m_localFogFieldSurface.Get());
   D3DVIEWPORT9 fieldViewport{0,0,kLocalFogFieldSize,kLocalFogFieldSize,0,1};d->SetViewport(&fieldViewport);
   d->SetPixelShader(m_localFogFieldShader.Get());d->SetTexture(0,f.atmosphereNoise);
@@ -637,7 +663,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
   d->SetSamplerState(1,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(1,D3DSAMP_SRGBTEXTURE,FALSE);
   d->SetSamplerState(1,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(1,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
-  float wakeShape[4]={m_settings.localFogWakeRadius,m_settings.localFogTrailLength,m_settings.localFogWakeStrength,0};
+  float wakeShape[4]={settings.localFogWakeRadius,settings.localFogTrailLength,settings.localFogWakeStrength,0};
   d->SetPixelShaderConstantF(0,field,1);d->SetPixelShaderConstantF(1,wakeShape,1);
   DrawScreenQuad(d,kLocalFogFieldSize,kLocalFogFieldSize);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);
  }
@@ -646,22 +672,22 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereIntegrate);d->SetRenderTarget(0,m_integratedSurface.Get());d->SetPixelShader(m_integrateShader.Get());d->SetTexture(0,m_depthTexture[write].Get());d->SetTexture(1,f.atmosphereNoise);d->SetTexture(2,m_groundHeightTexture[groundWrite].Get());d->SetTexture(3,f.waterMaskTexture);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MAGFILTER,D3DTEXF_POINT);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(2,D3DSAMP_MAGFILTER,D3DTEXF_POINT);
   for(DWORD s=0;s<2;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);}
   float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,1};d->SetPixelShaderConstantF(0,c0,1);
-  float intensity=f.celestialIntensity*(f.celestialIsMoon?m_settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
-  float c2[4]={ambR,ambG,ambB,m_settings.aerialDensity*m_settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,m_settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
+  float intensity=f.celestialIntensity*(f.celestialIsMoon?settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
+  float c2[4]={ambR,ambG,ambB,settings.aerialDensity*settings.densityScale};float c3[4]={std::clamp(ambR*1.5f,.12f,1.f),std::clamp(ambG*1.5f,.12f,1.f),std::clamp(ambB*1.5f,.12f,1.f),settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
   // The integration shader uses the persistent GPU ground reference.
-  float c8[4]={aerialStart,aerialEnd,float(std::min(96u,m_settings.sampleCount*4)),0};float c9[4]={m_settings.fogBaseOffset,m_settings.heightFalloff,m_settings.heightDensity*m_settings.densityScale,0};float c10[4]={m_settings.mistBaseOffset,m_settings.mistFalloff,m_settings.mistDensity*m_settings.densityScale,m_settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*m_settings.sunGlowStrength,.75f*m_settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(m_settings.debugMode)),m_settings.fogWash,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
-  float c15[4]={m_settings.localFogEnabled?1.f:0.f,m_settings.localFogDensity,m_settings.localFogBaseOffset,m_settings.localFogHeightFalloff};
+  float c8[4]={aerialStart,aerialEnd,float(std::min(96u,settings.sampleCount*4)),0};float c9[4]={settings.fogBaseOffset,settings.heightFalloff,settings.heightDensity*settings.densityScale,0};float c10[4]={settings.mistBaseOffset,settings.mistFalloff,settings.mistDensity*settings.densityScale,settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*settings.sunGlowStrength,.75f*settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(settings.debugMode)),settings.fogWash,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};
+  float c15[4]={settings.localFogEnabled?1.f:0.f,settings.localFogDensity,settings.localFogBaseOffset,settings.localFogHeightFalloff};
   float c17[4]={0,65.f,0,0};
   float localPosRadius[8][4]{};float localColorPower[8][4]{};
   const auto& localManager=LocalLightManager::Instance();const auto& localLights=localManager.Selected();
   const int localCount=std::min<int>(8,int(localLights.size()));
-  for(int li=0;li<localCount;++li){localPosRadius[li][0]=localLights[li].position.x;localPosRadius[li][1]=localLights[li].position.y;localPosRadius[li][2]=localLights[li].position.z;localPosRadius[li][3]=localLights[li].radius;localColorPower[li][0]=localLights[li].color.x;localColorPower[li][1]=localLights[li].color.y;localColorPower[li][2]=localLights[li].color.z;localColorPower[li][3]=localLights[li].intensity*localManager.IntensityScale()*std::sqrt(std::max(0.f,localManager.RayScale()));}
+  for(int li=0;li<localCount;++li){localPosRadius[li][0]=localLights[li].position.x;localPosRadius[li][1]=localLights[li].position.y;localPosRadius[li][2]=localLights[li].position.z;localPosRadius[li][3]=localLights[li].radius;localColorPower[li][0]=localLights[li].color.x;localColorPower[li][1]=localLights[li].color.y;localColorPower[li][2]=localLights[li].color.z;localColorPower[li][3]=localLights[li].intensity*localManager.IntensityScale()*f.environment[Lighting]*std::sqrt(std::max(0.f,localManager.RayScale()));}
   float localDebug[4]={float(localManager.DebugMode()),float(localCount),0,0};
   // Keep the authored distance/height atmosphere and the local bank as
   // independent layers.  Day/night factors only tint the medium; they never
   // decide whether it exists.
-  float layerEnable[4]={globalFogEnabled?1.f:0.f,m_settings.densityScale,
+  float layerEnable[4]={globalFogEnabled?1.f:0.f,settings.densityScale,
                         f.daylightFactor,f.moonlightFactor};
   d->SetPixelShaderConstantF(8,c8,1);d->SetPixelShaderConstantF(9,c9,1);d->SetPixelShaderConstantF(10,c10,1);d->SetPixelShaderConstantF(11,c11,1);d->SetPixelShaderConstantF(12,c12,1);d->SetPixelShaderConstantF(13,c13,1);d->SetPixelShaderConstantF(14,c14,1);d->SetPixelShaderConstantF(15,c15,1);d->SetPixelShaderConstantF(17,c17,1);d->SetPixelShaderConstantF(18,localPosRadius[0],8);d->SetPixelShaderConstantF(26,localColorPower[0],8);d->SetPixelShaderConstantF(34,localDebug,1);d->SetPixelShaderConstantF(35,layerEnable,1);
   const auto& terrain=GroundSurfaceCapture::Instance();
@@ -670,20 +696,20 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   d->SetSamplerState(4,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(4,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);d->SetSamplerState(4,D3DSAMP_MIPFILTER,D3DTEXF_NONE);
   d->SetSamplerState(4,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);d->SetSamplerState(4,D3DSAMP_SRGBTEXTURE,FALSE);
   float fieldLookup[4]={field[0],field[1],1.f/kLocalFogFieldExtent,0};d->SetPixelShaderConstantF(38,fieldLookup,1);
-  d->SetTexture(5,m_settings.localFogEnabled&&m_settings.localFogDensity>0?m_localFogFieldTexture.Get():nullptr);
+  d->SetTexture(5,settings.localFogEnabled&&settings.localFogDensity>0?m_localFogFieldTexture.Get():nullptr);
   d->SetSamplerState(5,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(5,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR);
   d->SetSamplerState(5,D3DSAMP_MIPFILTER,D3DTEXF_NONE);d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,FALSE);
   d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(5,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);
   DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD si=0;si<6;++si)d->SetTexture(si,nullptr);
  }
  IDirect3DTexture9* atmosphere=m_integratedTexture.Get();bool historyOk=ValidateHistory(f);
- const bool runTemporal=m_settings.temporalEnabled&&(m_settings.debugMode==VolumetricDebugMode::None||m_settings.debugMode==VolumetricDebugMode::Temporal||m_settings.debugMode==VolumetricDebugMode::Upsampled);
- if(runTemporal){ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereTemporal);d->SetRenderTarget(0,m_historySurface[write].Get());d->SetPixelShader(m_temporalShader.Get());d->SetTexture(0,m_integratedTexture.Get());d->SetTexture(1,m_historyTexture[m_historyReadIndex].Get());d->SetTexture(2,m_depthTexture[write].Get());d->SetTexture(3,m_depthTexture[m_historyReadIndex].Get());for(DWORD s=0;s<4;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);}float c0[4]={1.f/m_lowWidth,1.f/m_lowHeight,m_settings.temporalBlend,historyOk?1.f:0.f};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,f.projUnpack,1);float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(2,inv[0],3);float cam[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};d->SetPixelShaderConstantF(5,cam,1);d->SetPixelShaderConstantF(6,&m_previousView.m[0][0],4);d->SetPixelShaderConstantF(10,m_previousProjection,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);atmosphere=m_historyTexture[write].Get();}
+ const bool runTemporal=settings.temporalEnabled&&(settings.debugMode==VolumetricDebugMode::None||settings.debugMode==VolumetricDebugMode::Temporal||settings.debugMode==VolumetricDebugMode::Upsampled);
+ if(runTemporal){ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereTemporal);d->SetRenderTarget(0,m_historySurface[write].Get());d->SetPixelShader(m_temporalShader.Get());d->SetTexture(0,m_integratedTexture.Get());d->SetTexture(1,m_historyTexture[m_historyReadIndex].Get());d->SetTexture(2,m_depthTexture[write].Get());d->SetTexture(3,m_depthTexture[m_historyReadIndex].Get());for(DWORD s=0;s<4;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s<2?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP);}float c0[4]={1.f/m_lowWidth,1.f/m_lowHeight,settings.temporalBlend,historyOk?1.f:0.f};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,f.projUnpack,1);float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(2,inv[0],3);float cam[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,0};d->SetPixelShaderConstantF(5,cam,1);d->SetPixelShaderConstantF(6,&m_previousView.m[0][0],4);d->SetPixelShaderConstantF(10,m_previousProjection,1);DrawScreenQuad(d,m_lowWidth,m_lowHeight);for(DWORD s=0;s<4;++s)d->SetTexture(s,nullptr);atmosphere=m_historyTexture[write].Get();}
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float c2[4]={float(uint32_t(m_settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereUpsample);d->SetViewport(&full);d->SetRenderTarget(0,m_upsampledSurface.Get());d->SetPixelShader(m_upsampleShader.Get());d->SetTexture(0,atmosphere);d->SetTexture(1,m_boundaryTexture.Get());d->SetTexture(2,m_depthTexture[write].Get());for(DWORD s=0;s<3;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,D3DTEXF_POINT);}float c0[4]={1.f/m_fullWidth,1.f/m_fullHeight,1.f/m_lowWidth,1.f/m_lowHeight};float c1[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};float c2[4]={float(uint32_t(settings.debugMode)),0,0,0};d->SetPixelShaderConstantF(0,c0,1);d->SetPixelShaderConstantF(1,c1,1);d->SetPixelShaderConstantF(2,c2,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);for(DWORD s=0;s<3;++s)d->SetTexture(s,nullptr);
  }
  {
-  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={m_settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,m_settings.extinctionStrength,m_settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={m_settings.edgeFogDistance,m_settings.edgeFogPower,m_settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);
+  ScopedGpuTimer timer(d,GpuPerfStage::AtmosphereComposite);d->SetRenderTarget(0,target);d->SetPixelShader(m_compositeShader.Get());d->SetTexture(0,f.sceneColor);d->SetTexture(1,m_upsampledTexture.Get());d->SetTexture(2,m_boundaryTexture.Get());d->SetTexture(3,f.waterMaskTexture);d->SetSamplerState(0,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR);d->SetSamplerState(2,D3DSAMP_MINFILTER,D3DTEXF_POINT);d->SetSamplerState(3,D3DSAMP_MINFILTER,D3DTEXF_POINT);float debug[4]={settings.debugMode==VolumetricDebugMode::None?0.f:1.f,1.f,settings.extinctionStrength,settings.scatterStrength};float source[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};float projection[4]={f.projUnpack[0],f.projUnpack[1],aerialEnd,0};d->SetPixelShaderConstantF(0,debug,1);d->SetPixelShaderConstantF(1,source,1);d->SetPixelShaderConstantF(2,projection,1);float edge[4]={settings.edgeFogDistance,settings.edgeFogPower,settings.edgeFogEnabled?1.f:0.f,0};float edgeColor[4]={ambR,ambG,ambB,0};d->SetPixelShaderConstantF(3,edge,1);d->SetPixelShaderConstantF(4,edgeColor,1);float edgeProjection[4]={f.projUnpack[2],f.projUnpack[3],0,0};float worldUp[4]={f.inverseView.m[0][2],f.inverseView.m[1][2],f.inverseView.m[2][2],0};d->SetPixelShaderConstantF(5,edgeProjection,1);d->SetPixelShaderConstantF(6,worldUp,1);DrawScreenQuad(d,m_fullWidth,m_fullHeight);d->SetTexture(0,nullptr);d->SetTexture(1,nullptr);d->SetTexture(2,nullptr);d->SetTexture(3,nullptr);
  }
  m_historyReadIndex=write;m_historyValid=true;m_previousCamera=f.cameraPosition;std::copy(std::begin(f.projUnpack),std::end(f.projUnpack),m_previousProjection);m_previousView=f.viewRaw;m_previousViewValid=f.viewRawValid;m_previousWasMoon=f.celestialIsMoon;m_previousCelestialIntensity=f.celestialIntensity;m_previousLocalLightSignature=LocalLightManager::Instance().SelectionSignature();return true;
 }

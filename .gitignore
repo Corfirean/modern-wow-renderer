@@ -24,6 +24,8 @@ CelestialDiagnostics/
 references/
 snapshots/
 *.py
+!tools/EnvironmentDatabaseBuilder/*.py
+__pycache__/
 *.json
 *.ps1
 *SmokeTest*

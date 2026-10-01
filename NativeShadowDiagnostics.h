@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 
 #include <windows.h>
@@ -77,11 +78,11 @@ inline std::wstring settingsPath;
 inline void ReloadEnhancement()
 {
     if (settingsPath.empty()) return;
-    enhancementEnabled = GetPrivateProfileIntW(L"NativeShadows", L"Enabled", 1, settingsPath.c_str()) != 0;
-    const int percent = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+    enhancementEnabled = renderer::locationtuning::ReadInt(L"NativeShadows", L"Enabled", 1, settingsPath.c_str()) != 0;
+    const int percent = std::clamp(static_cast<int>(renderer::locationtuning::ReadInt(
         L"NativeShadows", L"SoftnessPercent", 145, settingsPath.c_str())), 50, 220);
     softnessScale = static_cast<float>(percent) * .01f;
-    const int strengthPercent = std::clamp(static_cast<int>(GetPrivateProfileIntW(
+    const int strengthPercent = std::clamp(static_cast<int>(renderer::locationtuning::ReadInt(
         L"NativeShadows", L"StrengthPercent", 100, settingsPath.c_str())), 30, 250);
     strengthScale = static_cast<float>(strengthPercent) * .01f;
 }
@@ -154,13 +155,13 @@ inline void Configure(const std::wstring& basePath)
     const std::wstring ini = basePath + L"GraphicsEffects.ini";
     settingsPath = ini;
     ReloadEnhancement();
-    enabled = GetPrivateProfileIntW(L"ShadowDiagnostics", L"Enabled", 1, ini.c_str()) != 0;
-    logConstants = GetPrivateProfileIntW(L"ShadowDiagnostics", L"LogConstants", 1, ini.c_str()) != 0;
-    summaryInterval = static_cast<uint32_t>(std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ShadowDiagnostics", L"SummaryIntervalFrames", 300, ini.c_str())), 60, 3600));
-    maxUniqueCandidates = static_cast<uint32_t>(std::clamp(static_cast<int>(GetPrivateProfileIntW(L"ShadowDiagnostics", L"MaxUniqueCandidates", 256, ini.c_str())), 32, 1024));
+    enabled = renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"Enabled", 1, ini.c_str()) != 0;
+    logConstants = renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"LogConstants", 1, ini.c_str()) != 0;
+    summaryInterval = static_cast<uint32_t>(std::clamp(static_cast<int>(renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"SummaryIntervalFrames", 300, ini.c_str())), 60, 3600));
+    maxUniqueCandidates = static_cast<uint32_t>(std::clamp(static_cast<int>(renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"MaxUniqueCandidates", 256, ini.c_str())), 32, 1024));
     logPath = basePath + L"NativeShadowDiagnostics.log";
     dumpDirectory = basePath + L"NativeShadowShaders";
-    previewEnabled = GetPrivateProfileIntW(L"ShadowDiagnostics", L"PreviewEnabled", 1, ini.c_str()) != 0;
+    previewEnabled = renderer::locationtuning::ReadInt(L"ShadowDiagnostics", L"PreviewEnabled", 1, ini.c_str()) != 0;
     CreateDirectoryW(dumpDirectory.c_str(), nullptr);
     if (enabled)
     {

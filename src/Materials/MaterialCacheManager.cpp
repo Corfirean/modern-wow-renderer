@@ -1,3 +1,4 @@
+#include "../Environment/LocationTuning.h"
 #include "MaterialCacheManager.h"
 #include "TextureHashLookup.h"
 #include "WicTextureLoader.h"
@@ -52,16 +53,16 @@ namespace renderer
     void MaterialCacheManager::ReloadTuning(const std::wstring& basePath)
     {
         std::wstring ini = basePath + L"GraphicsEffects.ini";
-        m_enabled = GetPrivateProfileIntW(L"AIMaterials", L"Enabled", 1, ini.c_str()) != 0;
-        m_showStatus = GetPrivateProfileIntW(L"AIMaterials", L"ShowStatus", 0, ini.c_str()) != 0;
+        m_enabled = renderer::locationtuning::ReadInt(L"AIMaterials", L"Enabled", 1, ini.c_str()) != 0;
+        m_showStatus = renderer::locationtuning::ReadInt(L"AIMaterials", L"ShowStatus", 0, ini.c_str()) != 0;
 
-        int strengthInt = GetPrivateProfileIntW(L"AIMaterials", L"NormalStrengthPercent", 90, ini.c_str());
+        int strengthInt = renderer::locationtuning::ReadInt(L"AIMaterials", L"NormalStrengthPercent", 90, ini.c_str());
         m_globalNormalStrength = std::clamp(static_cast<float>(strengthInt) * 0.01f, 0.05f, 2.0f);
 
-        int parallaxInt = GetPrivateProfileIntW(L"AIMaterials", L"ParallaxDepthPercent", 35, ini.c_str());
+        int parallaxInt = renderer::locationtuning::ReadInt(L"AIMaterials", L"ParallaxDepthPercent", 35, ini.c_str());
         m_parallaxScale = std::clamp(static_cast<float>(parallaxInt) * 0.001f, 0.0f, 0.10f);
 
-        int shadowInt = GetPrivateProfileIntW(L"AIMaterials", L"SelfShadowStrength", 90, ini.c_str());
+        int shadowInt = renderer::locationtuning::ReadInt(L"AIMaterials", L"SelfShadowStrength", 90, ini.c_str());
         m_shadowStrength = std::clamp(static_cast<float>(shadowInt) * 0.01f, 0.0f, 1.5f);
 
         LogMessage(m_logPath, "Tuning reloaded: enabled=" + std::to_string(m_enabled) +

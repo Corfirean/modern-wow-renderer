@@ -69,7 +69,8 @@ jobs:
           $required = @(
             "$dir\d3d9.dll",
             "$dir\ModernWoWRenderer.ini",
-            "$dir\GraphicsEffects.ini"
+            "$dir\GraphicsEffects.ini",
+            "$dir\EnvironmentProfiles.ini"
           )
 
           foreach ($file in $required) {
@@ -90,6 +91,7 @@ jobs:
           Copy-Item "$source\d3d9.dll" $package
           Copy-Item "$source\ModernWoWRenderer.ini" $package
           Copy-Item "$source\GraphicsEffects.ini" $package
+          Copy-Item "$source\EnvironmentProfiles.ini" $package
 
           $materialCache = Join-Path $package "MaterialCache"
           New-Item -ItemType Directory -Force -Path $materialCache | Out-Null

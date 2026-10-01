@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include <windows.h>
 #include <d3d9.h>
@@ -5,6 +6,8 @@
 #include <array>
 #include <string>
 #include <vector>
+#include "src/Environment/OverlayFont.h"
+#include "src/Environment/EnvironmentProfileManager.h"
 
 namespace tuningoverlay {
 enum ItemKind { KIND_HEADER, KIND_TOGGLE, KIND_SLIDER };
@@ -94,16 +97,18 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"AIMaterials",L"SelfShadowStrength","SELF SHADOWS",0,150,5,90},
 
  // === IMAGE & COLOR ===
- {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},
+ {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR (GLOBAL) ---",0,0,0,0},
  {KIND_TOGGLE,L"PostProcess",L"Enabled","POST PROCESS",0,1,1,0},
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"GammaPercent","GAMMA",50,180,2,100},
  {KIND_SLIDER,L"PostProcess",L"SharpnessPercent","SHARPNESS",0,100,2,35}
 };
-inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(GetPrivateProfileIntW(i.section,i.key,i.value,ini.c_str())),i.lo,i.hi);}}
-inline void Save(Item& i){if(i.kind==KIND_HEADER)return;wchar_t b[32]{};_itow_s(i.value,b,10);WritePrivateProfileStringW(i.section,i.key,b,ini.c_str());}
+inline const std::vector<int> defaults=[](){std::vector<int> result;for(const auto& i:items)result.push_back(i.value);return result;}();
+inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);}}
+inline void Save(Item& i){if(i.kind==KIND_HEADER)return;renderer::locationtuning::Save(i.section,i.key,i.value);}
 inline const std::array<unsigned char,7>& Glyph(char c){
+ if(c>='a'&&c<='z')c=char(c-'a'+'A');
  static const std::array<unsigned char,7> blank{};
  static const std::array<unsigned char,7> dash={0,0,0,31,0,0,0};
  static const std::array<unsigned char,7> slash={1,2,4,8,16,0,0};
@@ -125,59 +130,132 @@ inline const std::array<unsigned char,7>& Glyph(char c){
 }
 struct V {float x,y,z,w;DWORD color;};
 inline void Rect(std::vector<V>& out,float x,float y,float w,float h,DWORD color){V a{x,y,0,1,color},b{x+w,y,0,1,color},c{x,y+h,0,1,color},d{x+w,y+h,0,1,color};out.insert(out.end(),{a,b,c,c,b,d});}
-inline void Text(std::vector<V>& out,float x,float y,const char* s,DWORD color,float scale=2.f){for(;*s;++s,x+=6*scale){if(*s==' '){continue;}auto& g=Glyph(*s);for(int yy=0;yy<7;++yy)for(int xx=0;xx<5;++xx)if(g[yy]&(16>>xx))Rect(out,x+xx*scale,y+yy*scale,scale,scale,color);}}
+inline void BitmapText(std::vector<V>& out,float x,float y,const char* s,DWORD color,float scale=2.f){for(;*s;++s,x+=6*scale){if(*s==' '){continue;}auto& g=Glyph(*s);for(int yy=0;yy<7;++yy)for(int xx=0;xx<5;++xx)if(g[yy]&(16>>xx))Rect(out,x+xx*scale,y+yy*scale,scale,scale,color);}}
+
+inline OverlayFont font;
+inline float uiScale=1;
+inline std::vector<std::string> environmentLines;
+inline constexpr int columns=3;
+inline constexpr float columnWidth=350,controlRow=24;
+inline const std::array<int,4>& ColumnStarts(){
+ static const std::array<int,4> starts=[](){
+  std::array<int,4> result{0,0,0,int(items.size())};
+  for(int i=0;i<int(items.size());++i)if(items[i].kind==KIND_HEADER){
+   if(std::string(items[i].label)=="--- WEATHER VISUALS ---")result[1]=i;
+   if(std::string(items[i].label)=="--- LOCAL LIGHTING ---")result[2]=i;
+  }
+  return result;
+ }();return starts;
+}
+inline int ItemColumn(int index){const auto& starts=ColumnStarts();return index>=starts[2]?2:index>=starts[1]?1:0;}
+inline int columnRows=1;
+inline float panelHeight=0;
+inline int renderWidth=0,renderHeight=0;
+inline float PanelX(){return 24*uiScale;}
+inline float PanelY(){return 24*uiScale;}
+inline float ControlsY(){return PanelY()+196*uiScale;}
+inline void Layout(int width,int height,HWND window){
+ using GetDpi=UINT(WINAPI*)(HWND);
+ auto getDpi=reinterpret_cast<GetDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow"));
+ float dpi=getDpi&&window?getDpi(window)/96.f:1.f;
+ const auto& starts=ColumnStarts();columnRows=std::max({starts[1]-starts[0],starts[2]-starts[1],starts[3]-starts[2]});
+ const float logicalHeight=196+columnRows*controlRow+18;
+ uiScale=std::clamp(std::max(height/1440.f,std::min(dpi,1.15f)),.85f,1.5f);
+ uiScale=std::min(uiScale,std::min((width-48.f)/(columns*columnWidth),(height-48.f)/logicalHeight));
+ uiScale=std::max(.5f,uiScale);
+ panelHeight=logicalHeight*uiScale;
+}
+inline int HitItem(float px,float py){
+ const float x=PanelX(),start=ControlsY();
+ if(px<x||px>=x+columns*columnWidth*uiScale||py<start)return -1;
+ int column=int((px-x)/(columnWidth*uiScale));
+ int row=int((py-start)/(controlRow*uiScale));
+ int index=ColumnStarts()[column]+row;
+ return row>=0&&row<columnRows&&index<ColumnStarts()[column+1]&&items[index].kind!=KIND_HEADER?index:-1;
+}
+inline std::string CompactLabel(const Item& item){
+ std::string result=item.label;
+ if(item.kind==KIND_HEADER){if(result.starts_with("--- "))result.erase(0,4);if(result.ends_with(" ---"))result.resize(result.size()-4);}
+ const auto hint=result.find(" (");if(hint!=result.npos)result.resize(hint);
+ return result;
+}
+inline int HitScope(float px,float py){
+ if(py<PanelY()+132*uiScale||py>=PanelY()+157*uiScale)return -1;
+ const float local=(px-PanelX())/uiScale;
+ if(local>=155&&local<585)return 0;
+ if(local>=595&&local<1038)return 1;
+ return -1;
+}
+inline bool SelectScope(int scope){
+ if(!renderer::locationtuning::editable||scope<0||scope>1||(scope==1&&!renderer::locationtuning::active.areaId))return false;
+ renderer::locationtuning::editZone=scope==0;dragItem=-1;
+ for(auto& i:items)if(i.kind!=KIND_HEADER)i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);
+ return true;
+}
 inline bool Update(){
  DWORD pid=0;HWND window=GetForegroundWindow();GetWindowThreadProcessId(window,&pid);bool focused=pid==GetCurrentProcessId();
- bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;if(focused&&f7&&!f7Down)visible=!visible;f7Down=f7;if(!visible||!focused){hover=-1;dragItem=-1;return false;}
- POINT p{};GetCursorPos(&p);ScreenToClient(window,&p);constexpr int x=160,y=42,w=550,row=21;
+ bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;if(focused&&f7&&!f7Down)visible=!visible;f7Down=f7;
+ if(!visible||!focused){hover=-1;dragItem=-1;mouseDown=false;return false;}
+ RECT client{};GetClientRect(window,&client);
+ if(!renderWidth||!renderHeight)Layout(client.right,client.bottom,window);
+ POINT p{};GetCursorPos(&p);ScreenToClient(window,&p);
+ const float px=renderWidth&&client.right>0?float(p.x)*renderWidth/client.right:float(p.x);
+ const float py=renderHeight&&client.bottom>0?float(p.y)*renderHeight/client.bottom:float(p.y);
  bool down=(GetAsyncKeyState(VK_LBUTTON)&0x8000)!=0;bool changed=false;
  if(!down)dragItem=-1;
- int curHover=(p.x>=x&&p.x<x+w&&p.y>=y+34)?(p.y-(y+34))/row:-1;
- if(curHover<0||curHover>=static_cast<int>(items.size())||items[curHover].kind==KIND_HEADER)curHover=-1;
+ if(down&&!mouseDown&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));mouseDown=down;return false;}
+ const int curHover=HitItem(px,py);
  hover=dragItem>=0?dragItem:curHover;
- if(down){
-  if(!mouseDown&&curHover>=0){
-   auto& i=items[curHover];
-   if(i.kind==KIND_TOGGLE){i.value=!i.value;Save(i);changed=true;}
-   else if(i.kind==KIND_SLIDER){dragItem=curHover;}
-  }
-  int activeIndex=dragItem>=0?dragItem:((!mouseDown&&curHover>=0&&items[curHover].kind==KIND_SLIDER)?curHover:-1);
-  if(activeIndex>=0){
-   auto& i=items[activeIndex];
-   float t=std::clamp((p.x-(x+265))/245.f,0.f,1.f);
-   int newVal=i.lo+int((i.hi-i.lo)*t/i.step+.5f)*i.step;
-   newVal=std::clamp(newVal,i.lo,i.hi);
-   if(newVal!=i.value){i.value=newVal;Save(i);changed=true;}
+ const int editItem=dragItem>=0?dragItem:curHover;
+ if(down&&(renderer::locationtuning::editable||(editItem>=0&&renderer::locationtuning::IsGlobal(items[editItem].section)))){
+  if(!mouseDown&&curHover>=0){auto& i=items[curHover];if(i.kind==KIND_TOGGLE){i.value=!i.value;Save(i);changed=true;}else dragItem=curHover;}
+  if(dragItem>=0){
+   auto& i=items[dragItem];const float left=PanelX()+ItemColumn(dragItem)*columnWidth*uiScale;
+   float t=std::clamp((px-left-252*uiScale)/(82*uiScale),0.f,1.f);
+   int value=std::clamp(i.lo+int((i.hi-i.lo)*t/i.step+.5f)*i.step,i.lo,i.hi);
+   if(value!=i.value){i.value=value;Save(i);changed=true;}
   }
  }
  mouseDown=down;return changed;
 }
 inline void Draw(IDirect3DDevice9* d){
- if(!visible||!d)return;IDirect3DStateBlock9* raw=nullptr;if(FAILED(d->CreateStateBlock(D3DSBT_ALL,&raw)))return;if(FAILED(raw->Capture())){raw->Release();return;}
- std::vector<V> v;constexpr float x=160,y=42,w=550,row=21;
- Rect(v,x,y,w,34+row*items.size()+10,0xe8121820);
- Rect(v,x,y,w,32,0xff1b3340);
- Text(v,x+14,y+8,"MODERN WOW RENDERER   F7 CLOSE",0xff8effbb,1.8f);
- for(size_t n=0;n<items.size();++n){
-  auto& i=items[n];float yy=y+34+float(n)*row;
-  if(i.kind==KIND_HEADER){
-   Rect(v,x,yy,w,row-1,0xff162836);
-   Text(v,x+14,yy+4,i.label,0xffffdc82,1.5f);
-  }else{
-   DWORD fg=int(n)==hover?0xffffffff:0xffc8d4da;
-   Text(v,x+14,yy+4,i.label,fg,1.4f);
-   if(i.kind==KIND_TOGGLE){
-    Rect(v,x+445,yy+3,78,15,i.value?0xff246b47:0xff4a3232);
-    Text(v,x+468,yy+4,i.value?"ON":"OFF",i.value?0xff9dffc0:0xffffaaaa,1.4f);
-   }else if(i.kind==KIND_SLIDER){
-    Rect(v,x+265,yy+6,245,9,0xff26343b);
-    float t=float(i.value-i.lo)/float(std::max(1,i.hi-i.lo));
-    Rect(v,x+265,yy+6,245*t,9,0xff45c985);
-    char b[16]{};_itoa_s(i.value,b,10);
-    Text(v,x+210,yy+4,b,0xffffdc82,1.4f);
+ if(!visible||!d)return;
+ IDirect3DStateBlock9* raw=nullptr;if(FAILED(d->CreateStateBlock(D3DSBT_ALL,&raw)))return;if(FAILED(raw->Capture())){raw->Release();return;}
+ D3DVIEWPORT9 viewport{};d->GetViewport(&viewport);D3DDEVICE_CREATION_PARAMETERS creation{};d->GetCreationParameters(&creation);
+ environmentLines=renderer::EnvironmentProfileManager::Instance().CompactDebugLines();
+ renderWidth=int(viewport.Width);renderHeight=int(viewport.Height);
+ Layout(viewport.Width,viewport.Height,creation.hFocusWindow);
+ struct Label {float x,y,right;std::string text;DWORD color;};std::vector<Label> labels;std::vector<V> v;
+ float x=PanelX(),y=PanelY(),w=columns*columnWidth*uiScale,row=controlRow*uiScale;
+ auto label=[&](float xx,float yy,const std::string& text,DWORD color,float right){labels.push_back({xx,yy,right,text,color});};
+ Rect(v,x,y,w,panelHeight,0xf5121820);Rect(v,x,y,w,30*uiScale,0xff1b3340);
+ label(x+12*uiScale,y+5*uiScale,"Modern WoW Renderer",0xff8effbb,x+w);
+ label(x+w-220*uiScale,y+5*uiScale,renderer::locationtuning::editable?"Local preset / F7 close":"Read only / F7 close",0xffb5cbd6,x+w-12*uiScale);
+ for(size_t i=0;i<environmentLines.size();++i)label(x+12*uiScale,y+(36+23*i)*uiScale,environmentLines[i],i?0xffdce5ea:0xffffdc82,x+w-12*uiScale);
+ const auto& manager=renderer::EnvironmentProfileManager::Instance();
+ const bool zone=renderer::locationtuning::editZone||!renderer::locationtuning::active.areaId;
+ label(x+12*uiScale,y+135*uiScale,"Settings for:",0xffdce5ea,x+150*uiScale);
+ Rect(v,x+155*uiScale,y+132*uiScale,430*uiScale,25*uiScale,zone?0xff246b47:0xff26343b);
+ Rect(v,x+595*uiScale,y+132*uiScale,443*uiScale,25*uiScale,!zone?0xff246b47:0xff26343b);
+ label(x+162*uiScale,y+135*uiScale,"Entire zone - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
+ label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"This subarea - "+manager.AreaName():"Subarea unavailable (Area 0)",0xffdce5ea,x+w-12*uiScale);
+ label(x+12*uiScale,y+165*uiScale,"Subarea settings override zone settings.",0xffb5cbd6,x+w-12*uiScale);
+ for(int column=0;column<columns;++column){
+  float xx=x+column*columnWidth*uiScale;
+  if(column)Rect(v,xx-2*uiScale,ControlsY(),uiScale,panelHeight-196*uiScale,0xff2a3d48);
+  for(int n=0;n<columnRows;++n){
+   const int index=ColumnStarts()[column]+n;if(index>=ColumnStarts()[column+1])break;
+   auto& i=items[index];float yy=ControlsY()+n*row;
+   if(i.kind==KIND_HEADER){Rect(v,xx,yy,columnWidth*uiScale,row-1,0xff162836);label(xx+12*uiScale,yy+3*uiScale,CompactLabel(i),0xffffdc82,xx+(columnWidth-8)*uiScale);}
+   else{
+    label(xx+12*uiScale,yy+3*uiScale,CompactLabel(i),index==hover?0xffffffff:0xffdce5ea,xx+210*uiScale);
+    if(i.kind==KIND_TOGGLE){Rect(v,xx+276*uiScale,yy+3*uiScale,58*uiScale,18*uiScale,i.value?0xff246b47:0xff4a3232);label(xx+289*uiScale,yy+3*uiScale,i.value?"ON":"OFF",i.value?0xff9dffc0:0xffffaaaa,xx+340*uiScale);}
+    else{Rect(v,xx+252*uiScale,yy+8*uiScale,82*uiScale,9*uiScale,0xff26343b);float t=float(i.value-i.lo)/float(std::max(1,i.hi-i.lo));Rect(v,xx+252*uiScale,yy+8*uiScale,82*t*uiScale,9*uiScale,0xff45c985);label(xx+212*uiScale,yy+3*uiScale,std::to_string(i.value),0xffffdc82,xx+248*uiScale);}
    }
   }
  }
+ bool hasFont=font.Ensure(d,std::max(12,int(std::round(16*uiScale))));
+ if(!hasFont)for(const auto& l:labels)BitmapText(v,l.x,l.y,l.text.c_str(),l.color,1.6f*uiScale);
  d->SetVertexShader(nullptr);d->SetPixelShader(nullptr);d->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);d->SetTexture(0,nullptr);
  d->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
  d->SetTextureStageState(0,D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_ALPHAARG1,D3DTA_DIFFUSE);
@@ -186,6 +264,7 @@ inline void Draw(IDirect3DDevice9* d){
  d->SetRenderState(D3DRS_STENCILENABLE,FALSE);d->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);
  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
  d->SetRenderState(D3DRS_COLORWRITEENABLE,15);d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(v.size()/3),v.data(),sizeof(V));
+ if(hasFont)for(const auto& l:labels)font.Draw(d,l.x,l.y,l.text,l.color,l.right);
  raw->Apply();raw->Release();
 }
 }

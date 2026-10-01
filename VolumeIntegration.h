@@ -1,3 +1,5 @@
+#include "src/Effects/ImagePostProcess.h"
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include "NativeShadowDiagnostics.h"
 #include "VolumeEffects.h"
@@ -136,8 +138,8 @@ std::wstring mainIni, tuningIni;
 void Log(const char* s) { std::ofstream(std::filesystem::path(logPath), std::ios::app) << s << '\n'; }
 int ReadTuning(const wchar_t* key, int fallback, const wchar_t* section = L"Atmosphere") {
     wchar_t value[64]{};
-    GetPrivateProfileStringW(section, key, L"", value, std::size(value), tuningIni.c_str());
-    return value[0] ? int(wcstol(value, nullptr, 10)) : GetPrivateProfileIntW(section, key, fallback, mainIni.c_str());
+    renderer::locationtuning::ReadString(section, key, L"", value, std::size(value), tuningIni.c_str());
+    return value[0] ? int(wcstol(value, nullptr, 10)) : renderer::locationtuning::ReadInt(section, key, fallback, mainIni.c_str());
 }
 
 bool LegacyVolumeShaders::Ensure(IDirect3DDevice9* d)
@@ -299,6 +301,7 @@ void ReloadTuning() {
     gammaPercent = std::clamp(ReadTuning(L"GammaPercent", 100, L"PostProcess"), 50, 180);
     sharpnessPercent = std::clamp(ReadTuning(L"SharpnessPercent", 35, L"PostProcess"), 0, 100);
     postProcessEffectEnabled = ReadTuning(L"Enabled", 1, L"PostProcess") != 0;
+    {char message[160];sprintf_s(message,"PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);if(!logPath.empty())Log(message);}
     sunGlowPercent = std::clamp(ReadTuning(L"SunGlowPercent", 80), 0, 300);
     sunGlareEnabled = ReadTuning(L"SunGlareEnabled", 1) != 0;
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
@@ -326,7 +329,7 @@ void Configure(const std::wstring& base) {
     celestialProbeLogPath = base + L"CelestialProbe.log";
     renderer::PerformanceProfiler::Instance().SetLogPath(logPath);
     renderer::DirectionalVolumetricLighting::Instance().Configure(base);
-    enabled = GetPrivateProfileIntW(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
+    enabled = renderer::locationtuning::ReadInt(L"Volume", L"Enabled", 0, mainIni.c_str()) != 0;
     ReloadTuning();
 }
 
@@ -768,7 +771,7 @@ bool Composite(IDirect3DDevice9* d) {
         if (body) {
             constants[2][0] = body->screenX;
             constants[2][1] = body->screenY;
-            constants[2][2] = useSun ? strength : strength * moonStrength;
+            constants[2][2] = (useSun ? strength : strength * moonStrength) * frameCtx.environment[renderer::Rays];
             constants[10][0] = body->viewSpaceDirection.x;
             constants[10][1] = body->viewSpaceDirection.y;
             constants[10][2] = body->viewSpaceDirection.z;
@@ -1055,6 +1058,18 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetViewport(&fullVp));
         check(d->SetPixelShader(legacyShaders.copy.Get()));
         check(d->SetTexture(0, finalRays));
+        auto* linkedFog=atmosphereRendered?renderer::DirectionalVolumetricLighting::Instance().GetResolvedFogTexture():nullptr;
+        if(legacyShaders.rayComposite){
+            check(d->SetPixelShader(legacyShaders.rayComposite.Get()));
+            check(d->SetTexture(1,linkedFog));
+            check(d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR));
+            check(d->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR));
+            check(d->SetSamplerState(1,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(1,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(1,D3DSAMP_SRGBTEXTURE,FALSE));
+            float link[4]={linkedFog?1.f:0.f,shaftDebug?1.f:0.f,0,0};
+            check(d->SetPixelShaderConstantF(0,link,1));
+        }
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, shaftDebug ? FALSE : TRUE));
@@ -1064,26 +1079,16 @@ bool Composite(IDirect3DDevice9* d) {
         }
         if (ok) drawQuad(desc.Width, desc.Height);
         check(d->SetTexture(0, nullptr));
+        check(d->SetTexture(1, nullptr));
     }
 
-    // Post-processing pass
+    // Independent post pass: optional glare failures must not suppress grading.
     if (postProcessEffectEnabled && legacyShaders.postProcess &&
         (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) {
         renderer::ScopedCpuTimer postTimer(renderer::PerfStage::PostProcess);
-        if (SUCCEEDED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE))) {
-            check(d->SetRenderTarget(0, target.Get()));
-            check(d->SetViewport(&fullVp));
-            check(d->SetPixelShader(legacyShaders.postProcess.Get()));
-            check(d->SetTexture(0, legacyTargets.scene.Get()));
-            check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
-            check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-            check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-            float postParams[4] = { float(brightnessPercent) * 0.01f, float(contrastPercent) * 0.01f, float(gammaPercent) * 0.01f, float(sharpnessPercent) * 0.01f };
-            float rsize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
-            check(d->SetPixelShaderConstantF(0, postParams, 1));
-            check(d->SetPixelShaderConstantF(1, rsize, 1));
-            if (ok) drawQuad(desc.Width, desc.Height);
-        }
+        const float postParams[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
+        const HRESULT postResult=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),postParams);
+        if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg,"PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
     }
 
     // Debug: crosshair(s) at the screen position(s) various sun/moon source
@@ -1285,6 +1290,24 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
     return ok;
 }
 
+bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
+    if (!target || !surface || !postProcessEffectEnabled ||
+        (brightnessPercent==0 && contrastPercent==100 && gammaPercent==100 && sharpnessPercent==0)) return false;
+    ComPtr<IDirect3DSurface9> currentTarget;
+    if(FAILED(d->GetRenderTarget(0,currentTarget.GetAddressOf())) || currentTarget.Get()!=target.Get())return false;
+    D3DSURFACE_DESC desc{};
+    if(FAILED(target->GetDesc(&desc)) || !legacyShaders.Ensure(d) ||
+        !legacyTargets.Ensure(d,desc.Width,desc.Height,desc.Format,std::max<UINT>(1,desc.Width/2),std::max<UINT>(1,desc.Height/2)))return false;
+    const float params[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
+    const auto tracked=renderer::g_trackedState;
+    internal=true;
+    const HRESULT hr=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),params);
+    internal=false;
+    renderer::g_trackedState=tracked;
+    if(SUCCEEDED(hr)){static bool logged=false;if(!logged){Log("PostProcess applied independently of camera capture");logged=true;}return true;}
+    return false;
+}
+
 void BeforeDraw(IDirect3DDevice9* d) {
     if (!enabled || !active || internal || owner != d || composed) return;
 
@@ -1310,6 +1333,7 @@ void BeforeDraw(IDirect3DDevice9* d) {
         }
     }
 
+    if (!ready && isUi) { composed=PostProcessWithoutCamera(d); return; }
     if (!ready || !isUi) return;
 
     composed = true;
@@ -1325,6 +1349,7 @@ void BeforeDraw(IDirect3DDevice9* d) {
 }
 
 void Present(IDirect3DDevice9* d) {
+    if(enabled && active && !composed && !ready)composed=PostProcessWithoutCamera(d);
     if (enabled && active && !composed && ready) {
         composed = true;
         if (Composite(d)) {

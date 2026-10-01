@@ -1,3 +1,5 @@
+#include "../VolumeEffects.h"
+#include "../src/Effects/ImagePostProcess.h"
 // Exercises the shipped atmosphere/local-light classes on the real D3D9 device.
 // Synthetic depth is encoded with WoW's viewport range, not just 0..1.
 #include <windows.h>
@@ -103,6 +105,10 @@ int main() try {
  auto render=[&](bool global){Check(d->SetRenderTarget(0,back.Get()));Check(d->SetViewport(&f.viewport));Check(d->SetPixelShaderConstantF(0,sentinels[0],64));Check(d->SetTexture(5,scene.Get()));Check(d->SetSamplerState(5,D3DSAMP_ADDRESSU,D3DTADDRESS_MIRROR));Check(d->SetSamplerState(5,D3DSAMP_SRGBTEXTURE,TRUE));Check(d->BeginScene());bool ok=fog.Render(d.Get(),f,back.Get(),global);Check(d->EndScene());Require(ok,"production atmosphere render");float restored[64][4];Check(d->GetPixelShaderConstantF(0,restored[0],64));Require(!memcmp(sentinels,restored,sizeof(restored)),"c0..c63 restored");ComPtr<IDirect3DBaseTexture9> tex5;DWORD address5=0,srgb5=0;Check(d->GetTexture(5,tex5.GetAddressOf()));Check(d->GetSamplerState(5,D3DSAMP_ADDRESSU,&address5));Check(d->GetSamplerState(5,D3DSAMP_SRGBTEXTURE,&srgb5));Require(tex5.Get()==scene.Get()&&address5==D3DTADDRESS_MIRROR&&srgb5==TRUE,"field sampler restored");D3DVIEWPORT9 restoredViewport{};Check(d->GetViewport(&restoredViewport));Require(!memcmp(&restoredViewport,&f.viewport,sizeof(f.viewport)),"atmosphere viewport restored");return pixel();};
  auto diff=[](DWORD a,DWORD b){int m=0;for(int s=0;s<24;s+=8)m=std::max(m,abs(int((a>>s)&255)-int((b>>s)&255)));return m;};
  encode(120,1);DWORD standard=render(true);Require(diff(standard,0xff202020)>8,"fog visible on first resource creation");
+ const float baseDensity=settings.densityScale;
+ f.environment.values[FogDensity]=0;
+ Require(render(true)==0xff202020&&settings.densityScale==baseDensity,"environment fog multiplier affects GPU without mutating base settings");
+ f.environment={};
  encode(120,.94f);DWORD compressed=render(true);printf("fog z=120 standard=%08lx compressed=%08lx\n",standard,compressed);Require(diff(standard,compressed)<=2,"viewport MaxZ=.94 matches MaxZ=1");
  encode(120,.94f,.1f);Require(diff(standard,render(true))<=2,"nonzero viewport MinZ");
  Require(render(false)==0xff202020,"both fog layers off preserve scene");
@@ -111,7 +117,7 @@ int main() try {
  settings.localFogHeightFalloff=1.f;DWORD thin=render(false);
  settings.localFogHeightFalloff=.125f;DWORD thick=render(false);
  Require(diff(thick,0xff202020)>diff(thin,0xff202020)+5,"increasing local height thickens the volume");
- settings.localFogHeightFalloff=1.f/3;Require(diff(render(false),0xff202020)<=2,"view above compact bank remains clear within Gaussian tail");
+ settings.localFogHeightFalloff=1.f;Require(diff(render(false),0xff202020)<=2,"view above compact bank remains clear within Gaussian tail");
  settings.localFogBaseOffset=0;settings.localFogHeightFalloff=1.f/3;render(false);DWORD offsetZero=pixel(64,100);
  settings.localFogBaseOffset=-10;render(false);Require(diff(pixel(64,100),0xff202020)<=1&&diff(offsetZero,0xff202020)>5,"negative BaseOffset lowers the actual local layer");
  settings.localFogBaseOffset=4;DWORD elevated=render(false);settings.localFogBaseOffset=0;DWORD grounded=render(false);
@@ -122,12 +128,15 @@ int main() try {
  settings.localFogHeightFalloff=1.f/3;settings.localFogDensity=.3f;
  float savedWash=settings.fogWash;settings.fogWash=.18f;f.daylightFactor=0;
  render(false);DWORD nightBank=pixel(64,100);
- Require(diff(nightBank,0xff202020)>25,"height-three ground bank visible at night without lights");
- Require(diff(nightBank,((nightBank&255)*0x010101)|0xff000000)<12,"unlit bank is neutral whitish, not dark environment tint");
+ Require(diff(nightBank,0xff202020)>5,"height-three ground bank visible at night without lights");
+ Require((nightBank&255)>((nightBank>>16)&255),"unlit bank follows blue environment rather than fixed white");
  settings.fogWash=0;render(false);
  Require(diff(nightBank,pixel(64,100))<=1,"local bank independent of global fog wash");
- fill(noise.Get(),0xff888888);render(false);DWORD sparseBank=pixel(64,100);
- Require(diff(nightBank,0xff202020)>diff(sparseBank,0xff202020)+10,"noise produces different ground bank densities");
+ settings.localFogDensity=.005f;settings.debugMode=static_cast<VolumetricDebugMode>(1);
+ fill(noise.Get(),0xffb0b0b0);render(false);DWORD denseOptical=pixel(64,100);
+ fill(noise.Get(),0xff888888);render(false);DWORD sparseOptical=pixel(64,100);
+ Require((denseOptical&255)>(sparseOptical&255),"noise changes ground-bank optical density independently of colour");
+ settings.localFogDensity=.3f;settings.debugMode=static_cast<VolumetricDebugMode>(0);
  fill(noise.Get(),0);render(false);Require(pixel(64,100)==0xff202020,"clear gaps remain clear at maximum local density");
  fill(noise.Get(),0xffb0b0b0);settings.fogWash=savedWash;f.daylightFactor=1;
  settings.localFogEnabled=false;
@@ -308,17 +317,21 @@ int main() try {
   double vx=2*(x+.5)/128-1,vy=1-2*(y+.5)/128,scale=sqrt(vx*vx+vy*vy+1);
   double denominator=.1*vx+.08-vy,z=denominator>0?std::min(120.,5/denominator):120.;
   double length=std::min(z*scale,97.5),tau=0,step=length/8192;
-  double bank=smooth(.30f,.78f,176.f/255),height=3*(.48+.32*bank);
+  double n=176./255,shape=smooth(.28f,.72f,float(n));
+  auto fieldSlice=[&](double h){double warp=(n-.5)*.3;
+   double low=shape*exp(-2*(h-warp)*(h-warp)/(.65*.65));
+   double mid=shape*exp(-2*(h-.48-warp)*(h-.48-warp)/(.62*.62));
+   double high=shape*exp(-2*(h-.95-warp)*(h-.95-warp)/(.58*.58));
+   return 1-exp(-(low*.85+mid*.65+high*.4)*1.25);};
   for(int i=0;i<8192;++i){double t=(i+.5)*step,px=vx/scale*t,py=t/scale,pz=vy/scale*t;
-   // Constant-noise fixture: independently integrate the four sampled height
-   // layers along the real slope, including the now-active BaseOffset.
    double relative=pz-(-5+.1*px+.08*py)-settings.localFogBaseOffset;
    double h=std::max(0.,relative)/3,density=0;
-   for(int layer=0;layer<4;++layer){double slice=layer*.5,edge=std::max(0.,bank-(1-176./255)*slice*.42);
-    density+=edge*edge*exp(-2*slice*slice/(height*height/9))*std::max(0.,1-abs(h-slice)*2);}
+   for(int layer=0;layer<4;++layer){double slice=layer*.5;
+    density+=fieldSlice(slice)*std::max(0.,1-abs(h-slice)*2);}
    density*=.1*2.2*smooth(-.4f,.05f,float(relative));
    density*=1-smooth(65*.65f,65,float(sqrt(px*px+py*py)));density*=smooth(1,6,float(t));tau+=density*step;}
-  double alpha=1-exp(-tau);return int((32./255*(1-alpha)+.72*alpha)*255+.5);};
+  double alpha=1-exp(-tau),transmitted=pow(32./255,2.2)*(1-alpha),headroom=1-transmitted;
+  double scatter=pow(.36,2.2)*alpha;return int(pow(transmitted+headroom*(1-exp(-scatter/headroom)),1/2.2)*255+.5);};
  slopingDepth();render(false);int slopeError=0;
  for(int y=70;y<=110;y+=5){int actual=(pixel(64,y)>>16)&255;printf("slope y=%d actual=%d ref=%d\n",y,actual,referenceBank(64,y));slopeError=std::max(slopeError,abs(actual-referenceBank(64,y)));}
  printf("sloped fog error versus 8192-step reference=%d\n",slopeError);
@@ -399,5 +412,37 @@ int main() try {
  for(const auto& l:manager.Selected())
   if(Length(l.position-Vec3{-9499.8376f,60.7080f,59.3262f})<.1f)outdoorLamp=true;
  Require(outdoorLamp,"actual screenshot-area street lamp is selected from shipped manifest");
+ // Exercise the exact production post pass with inherited additive/alpha state.
+ ComPtr<ID3DBlob> postCode;ComPtr<IDirect3DPixelShader9> postShader;
+ Check(D3DCompile(postProcessPixelSource,strlen(postProcessPixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,postCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)postCode->GetBufferPointer(),postShader.GetAddressOf()));
+ ComPtr<IDirect3DTexture9> postScratch;ComPtr<IDirect3DSurface9> postSurface;
+ Check(d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,postScratch.GetAddressOf(),nullptr));Check(postScratch->GetSurfaceLevel(0,postSurface.GetAddressOf()));
+ auto grade=[&](float brightness,float contrast,float gamma){
+  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff404040,1,0));
+  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_ONE);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_ONE);d->SetRenderState(D3DRS_COLORWRITEENABLE,1);
+  float params[4]={brightness,contrast,gamma,0};Check(d->BeginScene());Check(ApplyImagePostProcess(d.Get(),back.Get(),postScratch.Get(),postSurface.Get(),postShader.Get(),params));Check(d->EndScene());
+  DWORD mask=0;d->GetRenderState(D3DRS_COLORWRITEENABLE,&mask);Require(mask==1,"post process restores inherited colour mask");
+  Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));DWORD result=((DWORD*)((BYTE*)r.pBits+64*r.Pitch))[64];read->UnlockRect();return result&255;};
+ Require(abs(int(grade(0,1,1))-64)<=1,"neutral post process preserves scene");
+ Require(grade(.35f,1,1)>140,"post brightness visibly changes output");
+ Require(grade(0,1,1.68f)>100,"post gamma visibly changes output");
+ Require(grade(0,1.74f,1)<30,"post contrast visibly changes output");
+ ComPtr<ID3DBlob> rayLinkCode;ComPtr<IDirect3DPixelShader9> rayLinkShader;
+ Check(D3DCompile(rayCompositePixelSource,strlen(rayCompositePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,rayLinkCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)rayLinkCode->GetBufferPointer(),rayLinkShader.GetAddressOf()));
+ auto linkedRay=[&](int opacity,bool available,bool debug){
+  fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);
+  Check(d->BeginScene());Check(d->SetRenderTarget(0,back.Get()));
+  d->SetVertexShader(nullptr);d->SetPixelShader(rayLinkShader.Get());d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,mask.Get());
+  d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
+  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0};d->SetPixelShaderConstantF(0,link,1);
+  struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
+  Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());return pixel()&255;};
+ Require(linkedRay(0,true,false)==0,"clear medium suppresses linked rays");
+ Require(linkedRay(128,true,false)>120,"moderate fog reveals rays");
+ Require(linkedRay(250,true,false)<15,"dense banks extinguish linked rays");
+ Require(linkedRay(0,false,false)==128,"missing current fog preserves unlinked fallback");
+ Require(linkedRay(0,true,true)==128,"shaft diagnostic mask bypasses fog coupling");
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}

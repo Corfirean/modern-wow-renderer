@@ -1,3 +1,4 @@
+#include "src/Environment/LocationTuning.h"
 #pragma once
 #include <unordered_set>
 #include <cstdio>
@@ -314,7 +315,7 @@ WaterOutput main(float4 color:COLOR0,float2 uv0:TEXCOORD0,float2 uv1:TEXCOORD1,f
     return result_;
 }
 )HLSL";
-int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};GetPrivateProfileStringW(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):GetPrivateProfileIntW(L"Water",key,fallback,mainIni.c_str());}
+int ReadTuning(const wchar_t* key,int fallback){wchar_t value[64]{};renderer::locationtuning::ReadString(L"Water",key,L"",value,std::size(value),tuningIni.c_str());return value[0]?int(wcstol(value,nullptr,10)):renderer::locationtuning::ReadInt(L"Water",key,fallback,mainIni.c_str());}
 void ReloadTuning(){
     effectEnabled=ReadTuning(L"Enabled",1)!=0;
     wavesEnabled=ReadTuning(L"WavesEnabled",1)!=0;geometryWavesEnabled=ReadTuning(L"GeometryWavesEnabled",0)!=0;
@@ -348,10 +349,10 @@ void ReloadTuning(){
 void Configure(const std::wstring& base) {
     mainIni=base+L"ModernWoWRenderer.ini";tuningIni=base+L"GraphicsEffects.ini";
     logPath=base+L"WaterEffect.log";
-    enabled=GetPrivateProfileIntW(L"Water",L"Enabled",0,mainIni.c_str())!=0;
+    enabled=renderer::locationtuning::ReadInt(L"Water",L"Enabled",0,mainIni.c_str())!=0;
     if(!enabled)return;
     ReloadTuning();
-    showStatus=GetPrivateProfileIntW(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
+    showStatus=renderer::locationtuning::ReadInt(L"Water",L"ShowStatus",0,mainIni.c_str())!=0;
     ComPtr<ID3DBlob> blob,error;
     HRESULT hr=D3DCompile(source,strlen(source),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,blob.GetAddressOf(),error.GetAddressOf());
     std::ofstream log(std::filesystem::path(logPath),std::ios::app);
