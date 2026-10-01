@@ -412,4 +412,3 @@ int main() try {
  Require(outdoorLamp,"actual screenshot-area street lamp is selected from shipped manifest");
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}
-
