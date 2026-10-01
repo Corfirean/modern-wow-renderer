@@ -145,7 +145,10 @@ HRESULT WINAPI HookedEndScene(IDirect3DDevice9* device)
 }
 
 HRESULT WINAPI HookedPresent(IDirect3DDevice9* d,const RECT* a,const RECT* b,HWND w,const RGNDATA* r) {
-    renderer::EnvironmentProfileManager::Instance().Update(GetTickCount64(),renderer::FrameContext::Current().cameraValid && renderer::FrameContext::Current().depthAvailable);
+    // Location IDs do not depend on the terrain-only camera layout. Cities
+    // still render into the captured world depth buffer with other shaders.
+    // The provider separately verifies the executable, coherent IDs and DB hierarchy.
+    renderer::EnvironmentProfileManager::Instance().Update(GetTickCount64(),renderer::DepthCapture::Instance().HasDepth());
     renderer::FrameContext::Current().environment=renderer::EnvironmentProfileManager::Instance().State();
     waterreflection::Present();
     volume::Present(d);

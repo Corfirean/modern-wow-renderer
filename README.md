@@ -36,7 +36,7 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
     <td><img src="Screenshots/WoWScrnShot_092726_000749.jpg" alt="Red environment lighting" /></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/photo_2026-09-28_22-34-17.jpg" alt="In-game F7 tuning menu" /></td>
+    <td><img src="Screenshots/f7-location-settings.png" alt="Compact F7 menu with zone and subarea preset selection" /></td>
     <td></td>
   </tr>
 </table>
@@ -96,6 +96,10 @@ Modern WoW Renderer is a 32-bit Direct3D 9 proxy (`d3d9.dll`) that adds modern l
 
 `F8` is reserved for the unfinished AI Materials development path and is not a supported user control.
 
+F7 saves atmospheric, lighting, water and weather settings separately for each location. Select `Entire zone` to edit settings inherited by its subareas, or `This subarea` for a more specific override. Subarea values take priority over zone values. The `IMAGE & COLOR (GLOBAL)` block always uses the shared `GraphicsEffects.ini`, including the post-process toggle. Existing local color overrides are ignored.
+
+Location presets require an exact verified executable fingerprint and an authoritative area database. See [the environment setup and validation guide](docs/ENVIRONMENT-SYSTEM-RU.md). With an unconfigured client, local settings remain read-only; global image/color settings are still editable. Updating the DLL does not require replacing your existing configuration files.
+
 ## Installation
 
 1. Download the newest ZIP from [GitHub Releases](https://github.com/Corfirean/modern-wow-renderer/releases).
@@ -133,7 +137,7 @@ Remove or rename `d3d9.dll` to disable the proxy completely.
 | `[WeatherVisuals]` | Rain/snow intensity, speed, wind, occlusion, lens droplets, and haze. |
 | `[Water]` | Reflections, refraction, ripples, foam, absorption, Fresnel, and glint. |
 | `[NativeShadows]` | Enhancement of the client's native shadow softness and strength. |
-| `[PostProcess]` | Brightness, contrast, gamma, and sharpness. |
+| `[PostProcess]` | Global enable switch, brightness, contrast, gamma, and sharpness. Always saved in `GraphicsEffects.ini`; location overrides are ignored. |
 | `[DistanceFog]` | Scaling for the client's native distance fog. |
 | `[AIMaterials]` | Unfinished experimental placeholder; keep disabled. |
 
@@ -164,6 +168,7 @@ Every successful push to `main` also creates a GitHub Release containing an inst
 - `d3d9.dll`
 - `ModernWoWRenderer.ini`
 - `GraphicsEffects.ini`
+- `EnvironmentProfiles.ini` (location verification and environment configuration)
 - required `MaterialCache` manifests
 - packaged weather textures
 

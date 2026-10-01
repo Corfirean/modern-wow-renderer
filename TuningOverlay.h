@@ -97,7 +97,7 @@ inline std::vector<Item> items={
  {KIND_SLIDER,L"AIMaterials",L"SelfShadowStrength","SELF SHADOWS",0,150,5,90},
 
  // === IMAGE & COLOR ===
- {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR ---",0,0,0,0},
+ {KIND_HEADER,nullptr,nullptr,"--- IMAGE & COLOR (GLOBAL) ---",0,0,0,0},
  {KIND_TOGGLE,L"PostProcess",L"Enabled","POST PROCESS",0,1,1,0},
  {KIND_SLIDER,L"PostProcess",L"BrightnessPercent","BRIGHTNESS",-50,50,1,0},
  {KIND_SLIDER,L"PostProcess",L"ContrastPercent","CONTRAST",50,180,2,100},
@@ -206,7 +206,8 @@ inline bool Update(){
  if(down&&!mouseDown&&HitScope(px,py)>=0){SelectScope(HitScope(px,py));mouseDown=down;return false;}
  const int curHover=HitItem(px,py);
  hover=dragItem>=0?dragItem:curHover;
- if(down&&renderer::locationtuning::editable){
+ const int editItem=dragItem>=0?dragItem:curHover;
+ if(down&&(renderer::locationtuning::editable||(editItem>=0&&renderer::locationtuning::IsGlobal(items[editItem].section)))){
   if(!mouseDown&&curHover>=0){auto& i=items[curHover];if(i.kind==KIND_TOGGLE){i.value=!i.value;Save(i);changed=true;}else dragItem=curHover;}
   if(dragItem>=0){
    auto& i=items[dragItem];const float left=PanelX()+ItemColumn(dragItem)*columnWidth*uiScale;

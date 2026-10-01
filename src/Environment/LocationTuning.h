@@ -7,6 +7,7 @@ inline std::wstring baseFile, localFile;
 inline LocationContext active;
 inline bool editable=false;
 inline bool editZone=false;
+inline bool IsGlobal(LPCWSTR section) { return section && _wcsicmp(section,L"PostProcess")==0; }
 inline std::wstring Scope(unsigned level) {
     std::wstring result=L"Map."+std::to_wstring(active.mapId);
     if(level>=1)result+=L".Zone."+std::to_wstring(active.zoneId);
@@ -19,7 +20,7 @@ inline bool Sync(const std::wstring& base,const LocationContext& location,bool v
     active=location;editable=location.valid&&verified;return changed;
 }
 inline DWORD ReadAtLevel(LPCWSTR section,LPCWSTR key,LPCWSTR fallback,LPWSTR output,DWORD size,LPCWSTR path,int topLevel) {
-    if(editable&&path&&baseFile==path) {
+    if(!IsGlobal(section)&&editable&&path&&baseFile==path) {
         for(int level=topLevel;level>=0;--level) {
             const auto scope=Scope(level)+L"."+section;
             wchar_t value[128]{};
@@ -41,6 +42,7 @@ inline UINT ReadInt(LPCWSTR section,LPCWSTR key,INT fallback,LPCWSTR path) {
     return value[0]?static_cast<UINT>(wcstol(value,nullptr,10)):static_cast<UINT>(fallback);
 }
 inline bool Save(LPCWSTR section,LPCWSTR key,int value) {
+    if(IsGlobal(section))return !baseFile.empty()&&WritePrivateProfileStringW(section,key,std::to_wstring(value).c_str(),baseFile.c_str())!=0;
     if(!editable)return false;
     const auto scope=Scope(editZone||!active.areaId?1:2)+L"."+section;
     return WritePrivateProfileStringW(scope.c_str(),key,std::to_wstring(value).c_str(),localFile.c_str())!=0;

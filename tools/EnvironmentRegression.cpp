@@ -38,6 +38,23 @@ int main() try {
  Require(!locationtuning::Save(L"Water",L"Enabled",1),"loading screen cannot save a preset");
  locationtuning::Sync(tuningBase,{571,65,4164,true},false);
  Require(!locationtuning::Save(L"Water",L"Enabled",1),"unverified database blocks location writes");
+ // Existing map/zone/subarea color overrides must never affect global grading.
+ locationtuning::Sync(tuningBase,{571,65,4164,true},true);
+ const wchar_t* colorKeys[]={L"Enabled",L"BrightnessPercent",L"ContrastPercent",L"GammaPercent",L"SharpnessPercent"};
+ const int globalValues[]={1,-6,108,80,42};
+ for(int k=0;k<5;++k){
+  for(unsigned level=0;level<3;++level){const auto section=locationtuning::Scope(level)+L".PostProcess";WritePrivateProfileStringW(section.c_str(),colorKeys[k],L"35",locationtuning::localFile.c_str());}
+  locationtuning::editZone=k%2==0;
+  Require(locationtuning::Save(L"PostProcess",colorKeys[k],globalValues[k]),"save color globally in either editor scope");
+  Require(int(locationtuning::ReadInt(L"PostProcess",colorKeys[k],0,locationtuning::baseFile.c_str()))==globalValues[k]&&int(locationtuning::ReadEditorInt(L"PostProcess",colorKeys[k],0,locationtuning::baseFile.c_str()))==globalValues[k],"runtime and editor ignore old color overrides");
+  Require(GetPrivateProfileIntW(L"PostProcess",colorKeys[k],0,locationtuning::baseFile.c_str())==globalValues[k],"global color writes shared graphics file");
+  Require(GetPrivateProfileIntW(L"Map.571.Zone.65.Area.4164.PostProcess",colorKeys[k],0,locationtuning::localFile.c_str())==35,"legacy local color values remain untouched");
+ }
+ locationtuning::Sync(tuningBase,{619,4494,4623,true},true);
+ Require(int(locationtuning::ReadInt(L"PostProcess",L"BrightnessPercent",0,locationtuning::baseFile.c_str()))==-6,"color remains identical after location change");
+ locationtuning::Sync(tuningBase,{},false);
+ Require(locationtuning::Save(L"PostProcess",L"Enabled",0)&&locationtuning::ReadInt(L"PostProcess",L"Enabled",1,locationtuning::baseFile.c_str())==0,"global color remains editable without valid local preset");
+ locationtuning::editZone=false;
  locationtuning::Sync(L"",{},false);
  EnvironmentConfiguration c;std::string error;
  const std::string text="[EnvironmentSystem]\nTransitionSeconds=4\nAreaDebounceMs=300\n[Default]\nFogDensityMultiplier=0.8\n[Environment.Forest]\nRayIntensityMultiplier=1.2\nLocalFogMultiplier=0.7\n[Environment.City]\nProfile=Forest\nLocalFogMultiplier=0.1\n[Map.0]\nFogDensityMultiplier=0.5\n[Zone.12]\nProfile=City\nFogDensityMultiplier=0.6\n[Area.87]\nRayIntensityMultiplier=0.3\n";

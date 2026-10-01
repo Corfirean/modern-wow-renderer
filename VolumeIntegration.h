@@ -1290,6 +1290,24 @@ bool CompositeLateLocalLights(IDirect3DDevice9* d) {
     return ok;
 }
 
+bool PostProcessWithoutCamera(IDirect3DDevice9* d) {
+    if (!target || !surface || !postProcessEffectEnabled ||
+        (brightnessPercent==0 && contrastPercent==100 && gammaPercent==100 && sharpnessPercent==0)) return false;
+    ComPtr<IDirect3DSurface9> currentTarget;
+    if(FAILED(d->GetRenderTarget(0,currentTarget.GetAddressOf())) || currentTarget.Get()!=target.Get())return false;
+    D3DSURFACE_DESC desc{};
+    if(FAILED(target->GetDesc(&desc)) || !legacyShaders.Ensure(d) ||
+        !legacyTargets.Ensure(d,desc.Width,desc.Height,desc.Format,std::max<UINT>(1,desc.Width/2),std::max<UINT>(1,desc.Height/2)))return false;
+    const float params[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
+    const auto tracked=renderer::g_trackedState;
+    internal=true;
+    const HRESULT hr=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),params);
+    internal=false;
+    renderer::g_trackedState=tracked;
+    if(SUCCEEDED(hr)){static bool logged=false;if(!logged){Log("PostProcess applied independently of camera capture");logged=true;}return true;}
+    return false;
+}
+
 void BeforeDraw(IDirect3DDevice9* d) {
     if (!enabled || !active || internal || owner != d || composed) return;
 
@@ -1315,6 +1333,7 @@ void BeforeDraw(IDirect3DDevice9* d) {
         }
     }
 
+    if (!ready && isUi) { composed=PostProcessWithoutCamera(d); return; }
     if (!ready || !isUi) return;
 
     composed = true;
@@ -1330,6 +1349,7 @@ void BeforeDraw(IDirect3DDevice9* d) {
 }
 
 void Present(IDirect3DDevice9* d) {
+    if(enabled && active && !composed && !ready)composed=PostProcessWithoutCamera(d);
     if (enabled && active && !composed && ready) {
         composed = true;
         if (Composite(d)) {
