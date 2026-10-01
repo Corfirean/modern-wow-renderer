@@ -45,6 +45,7 @@ if exist "$(ProjectDir)textures" xcopy /E /I /Y "$(ProjectDir)textures" "$(OutDi
     <ClInclude Include="src\Environment\EnvironmentProfileManager.h" />
     <ClInclude Include="src\Environment\LocationContext.h" />
     <ClInclude Include="src\Environment\LocationTuning.h" />
+    <ClInclude Include="src\Effects\ImagePostProcess.h" />
     <ClInclude Include="src\Environment\OverlayFont.h" />
     <ClInclude Include="src\Core\MathTypes.h" />
     <ClInclude Include="src\Core\FrameContext.h" />

@@ -1,3 +1,4 @@
+#include "src/Effects/ImagePostProcess.h"
 #include "src/Environment/LocationTuning.h"
 #pragma once
 #include "NativeShadowDiagnostics.h"
@@ -300,6 +301,7 @@ void ReloadTuning() {
     gammaPercent = std::clamp(ReadTuning(L"GammaPercent", 100, L"PostProcess"), 50, 180);
     sharpnessPercent = std::clamp(ReadTuning(L"SharpnessPercent", 35, L"PostProcess"), 0, 100);
     postProcessEffectEnabled = ReadTuning(L"Enabled", 1, L"PostProcess") != 0;
+    {char message[160];sprintf_s(message,"PostProcess effective enabled=%d brightness=%d contrast=%d gamma=%d sharpness=%d",postProcessEffectEnabled,brightnessPercent,contrastPercent,gammaPercent,sharpnessPercent);if(!logPath.empty())Log(message);}
     sunGlowPercent = std::clamp(ReadTuning(L"SunGlowPercent", 80), 0, 300);
     sunGlareEnabled = ReadTuning(L"SunGlareEnabled", 1) != 0;
     sunGlareStrength = float(ReadTuning(L"SunGlareStrengthPercent", 15)) * 0.01f;
@@ -1067,24 +1069,13 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetTexture(0, nullptr));
     }
 
-    // Post-processing pass
+    // Independent post pass: optional glare failures must not suppress grading.
     if (postProcessEffectEnabled && legacyShaders.postProcess &&
         (brightnessPercent != 0 || contrastPercent != 100 || gammaPercent != 100 || sharpnessPercent > 0)) {
         renderer::ScopedCpuTimer postTimer(renderer::PerfStage::PostProcess);
-        if (SUCCEEDED(d->StretchRect(target.Get(), nullptr, legacyTargets.sceneSurface.Get(), nullptr, D3DTEXF_NONE))) {
-            check(d->SetRenderTarget(0, target.Get()));
-            check(d->SetViewport(&fullVp));
-            check(d->SetPixelShader(legacyShaders.postProcess.Get()));
-            check(d->SetTexture(0, legacyTargets.scene.Get()));
-            check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
-            check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
-            check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE));
-            float postParams[4] = { float(brightnessPercent) * 0.01f, float(contrastPercent) * 0.01f, float(gammaPercent) * 0.01f, float(sharpnessPercent) * 0.01f };
-            float rsize[4] = { 1.f / desc.Width, 1.f / desc.Height, 0, 0 };
-            check(d->SetPixelShaderConstantF(0, postParams, 1));
-            check(d->SetPixelShaderConstantF(1, rsize, 1));
-            if (ok) drawQuad(desc.Width, desc.Height);
-        }
+        const float postParams[4]={brightnessPercent*.01f,contrastPercent*.01f,gammaPercent*.01f,sharpnessPercent*.01f};
+        const HRESULT postResult=renderer::ApplyImagePostProcess(d,target.Get(),legacyTargets.scene.Get(),legacyTargets.sceneSurface.Get(),legacyShaders.postProcess.Get(),postParams);
+        if(FAILED(postResult)){static HRESULT lastPostError=S_OK;if(lastPostError!=postResult){char msg[100];sprintf_s(msg,"PostProcess failed hr=0x%08lX",postResult);Log(msg);lastPostError=postResult;}}
     }
 
     // Debug: crosshair(s) at the screen position(s) various sun/moon source

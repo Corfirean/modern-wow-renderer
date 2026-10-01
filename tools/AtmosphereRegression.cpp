@@ -1,3 +1,5 @@
+#include "../VolumeEffects.h"
+#include "../src/Effects/ImagePostProcess.h"
 // Exercises the shipped atmosphere/local-light classes on the real D3D9 device.
 // Synthetic depth is encoded with WoW's viewport range, not just 0..1.
 #include <windows.h>
@@ -410,5 +412,21 @@ int main() try {
  for(const auto& l:manager.Selected())
   if(Length(l.position-Vec3{-9499.8376f,60.7080f,59.3262f})<.1f)outdoorLamp=true;
  Require(outdoorLamp,"actual screenshot-area street lamp is selected from shipped manifest");
+ // Exercise the exact production post pass with inherited additive/alpha state.
+ ComPtr<ID3DBlob> postCode;ComPtr<IDirect3DPixelShader9> postShader;
+ Check(D3DCompile(postProcessPixelSource,strlen(postProcessPixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,postCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)postCode->GetBufferPointer(),postShader.GetAddressOf()));
+ ComPtr<IDirect3DTexture9> postScratch;ComPtr<IDirect3DSurface9> postSurface;
+ Check(d->CreateTexture(128,128,1,D3DUSAGE_RENDERTARGET,D3DFMT_A8R8G8B8,D3DPOOL_DEFAULT,postScratch.GetAddressOf(),nullptr));Check(postScratch->GetSurfaceLevel(0,postSurface.GetAddressOf()));
+ auto grade=[&](float brightness,float contrast,float gamma){
+  Check(d->SetRenderTarget(0,back.Get()));Check(d->Clear(0,nullptr,D3DCLEAR_TARGET,0xff404040,1,0));
+  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_ONE);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_ONE);d->SetRenderState(D3DRS_COLORWRITEENABLE,1);
+  float params[4]={brightness,contrast,gamma,0};Check(d->BeginScene());Check(ApplyImagePostProcess(d.Get(),back.Get(),postScratch.Get(),postSurface.Get(),postShader.Get(),params));Check(d->EndScene());
+  DWORD mask=0;d->GetRenderState(D3DRS_COLORWRITEENABLE,&mask);Require(mask==1,"post process restores inherited colour mask");
+  Check(d->GetRenderTargetData(back.Get(),read.Get()));D3DLOCKED_RECT r{};Check(read->LockRect(&r,nullptr,D3DLOCK_READONLY));DWORD result=((DWORD*)((BYTE*)r.pBits+64*r.Pitch))[64];read->UnlockRect();return result&255;};
+ Require(abs(int(grade(0,1,1))-64)<=1,"neutral post process preserves scene");
+ Require(grade(.35f,1,1)>140,"post brightness visibly changes output");
+ Require(grade(0,1,1.68f)>100,"post gamma visibly changes output");
+ Require(grade(0,1.74f,1)<30,"post contrast visibly changes output");
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}
