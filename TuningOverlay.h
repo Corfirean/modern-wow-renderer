@@ -233,12 +233,12 @@ inline void Draw(IDirect3DDevice9* d){
  for(size_t i=0;i<environmentLines.size();++i)label(x+12*uiScale,y+(36+23*i)*uiScale,environmentLines[i],i?0xffdce5ea:0xffffdc82,x+w-12*uiScale);
  const auto& manager=renderer::EnvironmentProfileManager::Instance();
  const bool zone=renderer::locationtuning::editZone||!renderer::locationtuning::active.areaId;
- label(x+12*uiScale,y+135*uiScale,"\xd0\x9d\xd0\xb0\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd0\xba\xd0\xb8 \xd0\xb4\xd0\xbb\xd1\x8f:",0xffdce5ea,x+150*uiScale);
+ label(x+12*uiScale,y+135*uiScale,"Settings for:",0xffdce5ea,x+150*uiScale);
  Rect(v,x+155*uiScale,y+132*uiScale,430*uiScale,25*uiScale,zone?0xff246b47:0xff26343b);
  Rect(v,x+595*uiScale,y+132*uiScale,443*uiScale,25*uiScale,!zone?0xff246b47:0xff26343b);
- label(x+162*uiScale,y+135*uiScale,"\xd0\x92\xd1\x81\xd0\xb5\xd0\xb9 \xd0\xb7\xd0\xbe\xd0\xbd\xd1\x8b - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
- label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"\xd0\xad\xd1\x82\xd0\xbe\xd0\xb9 \xd0\xbf\xd0\xbe\xd0\xb4\xd0\xbb\xd0\xbe\xd0\xba\xd0\xb0\xd1\x86\xd0\xb8\xd0\xb8 - "+manager.AreaName():"\xd0\x9f\xd0\xbe\xd0\xb4\xd0\xbb\xd0\xbe\xd0\xba\xd0\xb0\xd1\x86\xd0\xb8\xd1\x8f \xd0\xbd\xd0\xb5\xd0\xb4\xd0\xbe\xd1\x81\xd1\x82\xd1\x83\xd0\xbf\xd0\xbd\xd0\xb0 (Area 0)",0xffdce5ea,x+w-12*uiScale);
- label(x+12*uiScale,y+165*uiScale,"\xd0\x9d\xd0\xb0\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd0\xba\xd0\xb8 \xd0\xbf\xd0\xbe\xd0\xb4\xd0\xbb\xd0\xbe\xd0\xba\xd0\xb0\xd1\x86\xd0\xb8\xd0\xb8 \xd0\xb8\xd0\xbc\xd0\xb5\xd1\x8e\xd1\x82 \xd0\xbf\xd1\x80\xd0\xb8\xd0\xbe\xd1\x80\xd0\xb8\xd1\x82\xd0\xb5\xd1\x82 \xd0\xbd\xd0\xb0\xd0\xb4 \xd0\xbd\xd0\xb0\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd0\xba\xd0\xb0\xd0\xbc\xd0\xb8 \xd0\xb7\xd0\xbe\xd0\xbd\xd1\x8b.",0xffb5cbd6,x+w-12*uiScale);
+ label(x+162*uiScale,y+135*uiScale,"Entire zone - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
+ label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"This subarea - "+manager.AreaName():"Subarea unavailable (Area 0)",0xffdce5ea,x+w-12*uiScale);
+ label(x+12*uiScale,y+165*uiScale,"Subarea settings override zone settings.",0xffb5cbd6,x+w-12*uiScale);
  for(int column=0;column<columns;++column){
   float xx=x+column*columnWidth*uiScale;
   if(column)Rect(v,xx-2*uiScale,ControlsY(),uiScale,panelHeight-196*uiScale,0xff2a3d48);
