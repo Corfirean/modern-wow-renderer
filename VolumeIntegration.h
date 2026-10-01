@@ -1058,6 +1058,18 @@ bool Composite(IDirect3DDevice9* d) {
         check(d->SetViewport(&fullVp));
         check(d->SetPixelShader(legacyShaders.copy.Get()));
         check(d->SetTexture(0, finalRays));
+        auto* linkedFog=atmosphereRendered?renderer::DirectionalVolumetricLighting::Instance().GetResolvedFogTexture():nullptr;
+        if(legacyShaders.rayComposite){
+            check(d->SetPixelShader(legacyShaders.rayComposite.Get()));
+            check(d->SetTexture(1,linkedFog));
+            check(d->SetSamplerState(1,D3DSAMP_MINFILTER,D3DTEXF_LINEAR));
+            check(d->SetSamplerState(1,D3DSAMP_MAGFILTER,D3DTEXF_LINEAR));
+            check(d->SetSamplerState(1,D3DSAMP_ADDRESSU,D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(1,D3DSAMP_ADDRESSV,D3DTADDRESS_CLAMP));
+            check(d->SetSamplerState(1,D3DSAMP_SRGBTEXTURE,FALSE));
+            float link[4]={linkedFog?1.f:0.f,shaftDebug?1.f:0.f,0,0};
+            check(d->SetPixelShaderConstantF(0,link,1));
+        }
         check(d->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR));
         check(d->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR));
         check(d->SetRenderState(D3DRS_ALPHABLENDENABLE, shaftDebug ? FALSE : TRUE));
@@ -1067,6 +1079,7 @@ bool Composite(IDirect3DDevice9* d) {
         }
         if (ok) drawQuad(desc.Width, desc.Height);
         check(d->SetTexture(0, nullptr));
+        check(d->SetTexture(1, nullptr));
     }
 
     // Independent post pass: optional glare failures must not suppress grading.

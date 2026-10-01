@@ -282,8 +282,18 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
 
 inline const char* rayCompositePixelSource=R"HLSL(
 sampler2D rays:register(s0);
+sampler2D resolvedFog:register(s1);
+// x=valid current-frame fog, y=raw diagnostic mask
+float4 fogLink:register(c0);
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
     float4 ray=tex2D(rays,uv);
+    if(fogLink.x>.5&&fogLink.y<.5) {
+        float transmission=saturate(1-tex2D(resolvedFog,uv).a);
+        // Shared integrated medium: clear air has little scatter; opaque banks
+        // extinguish rays. Maximum visibility occurs at intermediate thickness.
+        float visibility=4*transmission*(1-transmission);
+        ray.rgb*=visibility;
+    }
     return ray;
 }
 )HLSL";

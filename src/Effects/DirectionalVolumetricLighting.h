@@ -97,6 +97,7 @@ namespace renderer
         const VolumetricSettings& Settings() const { return m_settings; }
         IDirect3DTexture9* GetInteractionState() const { return m_groundHeightTexture[1-m_groundHeightWriteIndex].Get(); }
         IDirect3DTexture9* GetRaymarchTexture() const { return m_integratedTexture.Get(); }
+        IDirect3DTexture9* GetResolvedFogTexture() const { return m_upsampledTexture.Get(); }
 
     private:
         DirectionalVolumetricLighting() = default;

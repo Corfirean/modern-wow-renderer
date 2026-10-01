@@ -428,5 +428,21 @@ int main() try {
  Require(grade(.35f,1,1)>140,"post brightness visibly changes output");
  Require(grade(0,1,1.68f)>100,"post gamma visibly changes output");
  Require(grade(0,1.74f,1)<30,"post contrast visibly changes output");
+ ComPtr<ID3DBlob> rayLinkCode;ComPtr<IDirect3DPixelShader9> rayLinkShader;
+ Check(D3DCompile(rayCompositePixelSource,strlen(rayCompositePixelSource),nullptr,nullptr,nullptr,"main","ps_3_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,rayLinkCode.GetAddressOf(),nullptr));
+ Check(d->CreatePixelShader((DWORD*)rayLinkCode->GetBufferPointer(),rayLinkShader.GetAddressOf()));
+ auto linkedRay=[&](int opacity,bool available,bool debug){
+  fill(scene.Get(),0xff808080);fill(mask.Get(),DWORD(opacity)<<24);
+  Check(d->BeginScene());Check(d->SetRenderTarget(0,back.Get()));
+  d->SetVertexShader(nullptr);d->SetPixelShader(rayLinkShader.Get());d->SetFVF(D3DFVF_XYZRHW|D3DFVF_TEX1);d->SetTexture(0,scene.Get());d->SetTexture(1,mask.Get());
+  d->SetRenderState(D3DRS_ALPHABLENDENABLE,FALSE);d->SetRenderState(D3DRS_COLORWRITEENABLE,7);
+  float link[4]={available?1.f:0.f,debug?1.f:0.f,0,0};d->SetPixelShaderConstantF(0,link,1);
+  struct V{float x,y,z,w,u,v;};V q[]={{-.5f,-.5f,0,1,0,0},{127.5f,-.5f,0,1,1,0},{-.5f,127.5f,0,1,0,1},{127.5f,127.5f,0,1,1,1}};
+  Check(d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP,2,q,sizeof(V)));Check(d->EndScene());return pixel()&255;};
+ Require(linkedRay(0,true,false)==0,"clear medium suppresses linked rays");
+ Require(linkedRay(128,true,false)>120,"moderate fog reveals rays");
+ Require(linkedRay(250,true,false)<15,"dense banks extinguish linked rays");
+ Require(linkedRay(0,false,false)==128,"missing current fog preserves unlinked fallback");
+ Require(linkedRay(0,true,true)==128,"shaft diagnostic mask bypasses fog coupling");
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}
