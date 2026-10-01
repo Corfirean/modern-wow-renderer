@@ -117,25 +117,35 @@ const char* kLocalFogFieldSource = R"HLSL(
 sampler2D noiseMap:register(s0); sampler2D groundState:register(s1);
 float4 wakeShape:register(c1); // radius, trail length, strength
 float4 fieldOrigin:register(c0); // lower-left XY, extent, time
-float Density(float2 world,float height) {
+float Noise3(float3 p) {
+ // Smooth interpolation between decorrelated height slices in the noise atlas.
+ float z=floor(p.z),f=frac(p.z);f=f*f*(3-2*f);
+ float2 offset=float2(.173,.317);
+ float a=tex2Dlod(noiseMap,float4(p.xy+z*offset,0,0)).r;
+ float b=tex2Dlod(noiseMap,float4(p.xy+(z+1)*offset,0,0)).r;
+ return lerp(a,b,f);
+}
+float Bank(float3 p,float center,float thickness,float seed) {
  float t=fieldOrigin.w;
- float2 q=world/42+float2(-.013,.008)*t;
- float2 bend=float2(sin(q.y*2.1+t*.19+height*2),cos(q.x*1.7-t*.16-height*1.6));
- float2 warp=tex2Dlod(noiseMap,float4(q*.63+bend*.13+height*.19,0,0)).rg-.5;
- float2 domain=q+warp*.65+bend*.17;
- float broad=tex2Dlod(noiseMap,float4(domain+height*float2(.31,-.23),0,0)).r;
- float detail=tex2Dlod(noiseMap,float4(domain*3.23+float2(.009,-.014)*t+height*float2(-.7,.51),0,0)).g;
- float erosion=tex2Dlod(noiseMap,float4(domain*6.7-warp*.8+float2(-.017,-.011)*t+height*.83,0,0)).r;
- float bank=smoothstep(.30,.78,broad*.68+detail*.32);
- // Dense feet, rolling shoulders and eroded tops, with clear gaps between banks.
- float thickness=lerp(.48,.8,bank);
- float profile=exp(-2*height*height/(thickness*thickness));
- float edge=saturate(bank-(1-erosion)*height*.42);
- return saturate(edge*edge*profile);
+ float3 flow=float3(t*.003,-t*.002,t*.004);
+ float broad=Noise3(p+flow+seed);
+ float detail=Noise3(p*2.13-flow*.63+seed+.37);
+ float shape=smoothstep(.28,.72,broad*.78+detail*.22);
+ float top=center+(detail-.5)*.3;
+ return shape*exp(-2*(p.z-top)*(p.z-top)/(thickness*thickness));
+}
+float Density(float2 world,float height) {
+ // Independent overlapping volumes: changing flow deforms bridges between banks.
+ float3 p=float3(world/42,height);
+ float low=Bank(p,0,.65,0);
+ float middle=Bank(float3(p.xy*1.37,p.z),.48,.62,31.4);
+ float upper=Bank(float3(p.xy*.73,p.z),.95,.58,67.9);
+ return 1-exp(-(low*.85+middle*.65+upper*.4)*1.25);
 }
 float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 world=fieldOrigin.xy+uv*fieldOrigin.z;
- float4 density=float4(Density(world,0),Density(world,.5),Density(world,1),Density(world,1.5));
+ float4 density=0;
+ [loop]for(int slice=0;slice<4;++slice){float v=Density(world,slice*.5);density+=v*float4(slice==0,slice==1,slice==2,slice==3);}
  float4 actor=tex2Dlod(groundState,float4(.25,.5,0,0));
  float2 velocity=tex2Dlod(groundState,float4(.75,.5,0,0)).xy;
  float2 rel=world-actor.xy,flowDir=normalize(velocity+float2(1e-4,0));
@@ -206,7 +216,10 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
  float screenPhase=(phaseTuning.z*wideHalo+phaseTuning.w*forwardHalo)*sourceScreen.w;
  float directionalLean=pow(saturate(cosTheta*.5+.5),6)*.08;
  float discProtection=lerp(.06,1,smoothstep(.025,.055,sourceRadius));
- float phase=(screenPhase*.55+directionalLean)*discProtection;
+ // Normalized forward phase, bounded for artistic intensity and half-float stability.
+ float g=.62;
+ float angular=(1-g*g)/pow(max(1+g*g-2*g*cosTheta,.04),1.5);
+ float phase=(angular*.12*phaseTuning.z+screenPhase*.12+directionalLean*.25)*discProtection;
 
  // The horizon layer is analytic and therefore cannot disappear because a
  // raymarch missed the ground. Density changes its strength while distance
@@ -276,19 +289,19 @@ float4 main(float2 uv:TEXCOORD0,float2 vpos:VPOS):COLOR0 {
    float edge=saturate(1-perpendicular2/(radius*radius));
    float scatter=(1-exp(-medium*interval*directExtinction.w))*edge*edge/(1+perpendicular2*.035);
    float transmission=exp(-ambientAerial.w*layerEnable.x*begin*directExtinction.w);
-   localLightSum+=localLightColorPower[li].rgb*localLightColorPower[li].w*scatter*transmission;
+   localLightSum+=pow(max(localLightColorPower[li].rgb,0),2.2)*localLightColorPower[li].w*scatter*transmission;
  }
  float optical=max(0,globalOptical+heightOptical+localOptical)*directExtinction.w;
  float T=exp(-optical); float fogAmount=1-T;
  float day=saturate(layerEnable.z),moon=saturate(layerEnable.w);
- float3 neutralFog=lerp(float3(.15,.19,.24),ambientAerial.rgb,saturate(day+moon*.35));
+ float3 neutralFog=pow(max(ambientAerial.rgb,0),2.2)*lerp(.55,1,saturate(day+moon*.65));
  // Global wash controls distant haze only. Ground banks retain their own
  // neutral ambient scattering, including at night and away from lamps.
  float localAmount=1-exp(-max(0,localOptical)*directExtinction.w);
  float globalAmount=(1-exp(-max(0,globalOptical+heightOptical)*directExtinction.w))*frameTuning.z;
  T=(1-globalAmount)*(1-localAmount);
- float3 ambientSum=neutralFog*globalAmount*(1-localAmount)+float3(.72,.74,.76)*localAmount;
- float3 directSum=directExtinction.rgb*phase*celestial.w*fogAmount*frameTuning.z;
+ float3 ambientSum=neutralFog*(globalAmount*(1-localAmount)+localAmount);
+ float3 directSum=pow(max(directExtinction.rgb,0),2.2)*phase*celestial.w*fogAmount*frameTuning.z;
  // Light Rays controls lamp scattering independently of global Fog Wash.
  float invCount=1/max((float)count,1); int debugMode=(int)frameTuning.y;
  if(debugMode==1)return optical.xxxx; if(debugMode==2)return T.xxxx;
@@ -395,7 +408,13 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float T=saturate(1-a.a);
  float wash=tuning.y;
  float extinctionAmt=lerp(1.0,T,saturate(wash*tuning.z));
- float3 result=scene.rgb*extinctionAmt+a.rgb*wash*tuning.w;
+ float3 sceneLinear=pow(max(scene.rgb,0),2.2);
+ float3 scattering=max(a.rgb*wash*tuning.w,0);
+ // Compress added radiance using the remaining display headroom. At zero fog
+ // the scene is exactly preserved; bright scatter approaches white smoothly.
+ float3 transmitted=sceneLinear*extinctionAmt;
+ float3 headroom=max(1-transmitted,.02);
+ float3 result=transmitted+headroom*(1-exp(-scattering/headroom));
  float depth=tex2D(depthMap,uv).r;
  float edgeDistance=depth>=.9999?max(projection.z,edgeTuning.x*2):Linear(depth);
  float edge=saturate((edgeDistance-edgeTuning.x)/max(edgeTuning.x*.65,1));
@@ -403,7 +422,7 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float3 skyRay=normalize(float3((uv.x*2-1)/edgeProjection.x,(1-uv.y*2)/edgeProjection.y,1));
  float horizon=saturate(1-abs(dot(skyRay,worldUp.xyz))*2);
  edge*=depth>=.9999?horizon*horizon:1;
- result=lerp(result,edgeColor.rgb,edge);
+ result=lerp(result,pow(max(edgeColor.rgb,0),2.2),edge);
  // Boundary depth already clips the air integration to the water surface.
  // Preserve the game's own sun disc luminance. Atmosphere supplies the halo,
  // not a second emitter painted over the sprite. The sky-depth gate prevents
@@ -411,7 +430,8 @@ float4 main(float2 uv:TEXCOORD0):COLOR0 {
  float2 delta=float2((uv.x-sourceScreen.x)*sourceScreen.z,uv.y-sourceScreen.y);
  float disc=(1-smoothstep(.022,.045,length(delta)))*sourceScreen.w;
  disc*=smoothstep(.9985,.9999,tex2D(depthMap,uv).r);
- result=lerp(result,scene.rgb,disc);
+ result=lerp(result,sceneLinear,disc);
+ result=pow(max(result,0),1/2.2);
  // No water-specific handling here any more. The integrate/upsample/
  // temporal pipeline now marches air only down to the water SURFACE (see
  // kBoundarySource), not the seabed, so its output over water is already
@@ -653,7 +673,7 @@ bool DirectionalVolumetricLighting::Render(IDirect3DDevice9* d,const FrameContex
   for(DWORD s=0;s<2;++s){d->SetSamplerState(s,D3DSAMP_MINFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_MAGFILTER,s?D3DTEXF_LINEAR:D3DTEXF_POINT);d->SetSamplerState(s,D3DSAMP_ADDRESSU,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);d->SetSamplerState(s,D3DSAMP_ADDRESSV,s?D3DTADDRESS_WRAP:D3DTADDRESS_CLAMP);}
   float c0[4]={f.cameraPosition.x,f.cameraPosition.y,f.cameraPosition.z,1};d->SetPixelShaderConstantF(0,c0,1);
   float intensity=f.celestialIntensity*(f.celestialIsMoon?settings.moonStrength:1.f);float c1[4]={f.sunDirectionView.x,f.sunDirectionView.y,f.sunDirectionView.z,intensity};d->SetPixelShaderConstantF(1,c1,1);
-  float c2[4]={ambR,ambG,ambB,settings.aerialDensity*settings.densityScale};float c3[4]={f.celestialIsMoon?.28f:1.f,f.celestialIsMoon?.34f:.62f,f.celestialIsMoon?.46f:.30f,settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
+  float c2[4]={ambR,ambG,ambB,settings.aerialDensity*settings.densityScale};float c3[4]={std::clamp(ambR*1.5f,.12f,1.f),std::clamp(ambG*1.5f,.12f,1.f),std::clamp(ambB*1.5f,.12f,1.f),settings.extinction};d->SetPixelShaderConstantF(2,c2,1);d->SetPixelShaderConstantF(3,c3,1);d->SetPixelShaderConstantF(4,f.projUnpack,1);
   float inv[3][4]={{f.inverseView.m[0][0],f.inverseView.m[0][1],f.inverseView.m[0][2],0},{f.inverseView.m[1][0],f.inverseView.m[1][1],f.inverseView.m[1][2],0},{f.inverseView.m[2][0],f.inverseView.m[2][1],f.inverseView.m[2][2],0}};d->SetPixelShaderConstantF(5,inv[0],3);
   // The integration shader uses the persistent GPU ground reference.
   float c8[4]={aerialStart,aerialEnd,float(std::min(96u,settings.sampleCount*4)),0};float c9[4]={settings.fogBaseOffset,settings.heightFalloff,settings.heightDensity*settings.densityScale,0};float c10[4]={settings.mistBaseOffset,settings.mistFalloff,settings.mistDensity*settings.densityScale,settings.noiseAmount};float c11[4]={1.f/42.f,1.f/13.f,.30f,.18f};float c12[4]={32.f,220.f,.25f*settings.sunGlowStrength,.75f*settings.sunGlowStrength};float c13[4]={m_fogElapsed,float(uint32_t(settings.debugMode)),settings.fogWash,0};float c14[4]={f.sunScreenX,f.sunScreenY,float(m_fullWidth)/float(m_fullHeight),f.celestialIntensity>0.f?1.f:0.f};

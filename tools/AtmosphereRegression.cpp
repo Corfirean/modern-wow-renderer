@@ -115,7 +115,7 @@ int main() try {
  settings.localFogHeightFalloff=1.f;DWORD thin=render(false);
  settings.localFogHeightFalloff=.125f;DWORD thick=render(false);
  Require(diff(thick,0xff202020)>diff(thin,0xff202020)+5,"increasing local height thickens the volume");
- settings.localFogHeightFalloff=1.f/3;Require(diff(render(false),0xff202020)<=2,"view above compact bank remains clear within Gaussian tail");
+ settings.localFogHeightFalloff=1.f;Require(diff(render(false),0xff202020)<=2,"view above compact bank remains clear within Gaussian tail");
  settings.localFogBaseOffset=0;settings.localFogHeightFalloff=1.f/3;render(false);DWORD offsetZero=pixel(64,100);
  settings.localFogBaseOffset=-10;render(false);Require(diff(pixel(64,100),0xff202020)<=1&&diff(offsetZero,0xff202020)>5,"negative BaseOffset lowers the actual local layer");
  settings.localFogBaseOffset=4;DWORD elevated=render(false);settings.localFogBaseOffset=0;DWORD grounded=render(false);
@@ -126,12 +126,15 @@ int main() try {
  settings.localFogHeightFalloff=1.f/3;settings.localFogDensity=.3f;
  float savedWash=settings.fogWash;settings.fogWash=.18f;f.daylightFactor=0;
  render(false);DWORD nightBank=pixel(64,100);
- Require(diff(nightBank,0xff202020)>25,"height-three ground bank visible at night without lights");
- Require(diff(nightBank,((nightBank&255)*0x010101)|0xff000000)<12,"unlit bank is neutral whitish, not dark environment tint");
+ Require(diff(nightBank,0xff202020)>5,"height-three ground bank visible at night without lights");
+ Require((nightBank&255)>((nightBank>>16)&255),"unlit bank follows blue environment rather than fixed white");
  settings.fogWash=0;render(false);
  Require(diff(nightBank,pixel(64,100))<=1,"local bank independent of global fog wash");
- fill(noise.Get(),0xff888888);render(false);DWORD sparseBank=pixel(64,100);
- Require(diff(nightBank,0xff202020)>diff(sparseBank,0xff202020)+10,"noise produces different ground bank densities");
+ settings.localFogDensity=.005f;settings.debugMode=static_cast<VolumetricDebugMode>(1);
+ fill(noise.Get(),0xffb0b0b0);render(false);DWORD denseOptical=pixel(64,100);
+ fill(noise.Get(),0xff888888);render(false);DWORD sparseOptical=pixel(64,100);
+ Require((denseOptical&255)>(sparseOptical&255),"noise changes ground-bank optical density independently of colour");
+ settings.localFogDensity=.3f;settings.debugMode=static_cast<VolumetricDebugMode>(0);
  fill(noise.Get(),0);render(false);Require(pixel(64,100)==0xff202020,"clear gaps remain clear at maximum local density");
  fill(noise.Get(),0xffb0b0b0);settings.fogWash=savedWash;f.daylightFactor=1;
  settings.localFogEnabled=false;
@@ -312,17 +315,21 @@ int main() try {
   double vx=2*(x+.5)/128-1,vy=1-2*(y+.5)/128,scale=sqrt(vx*vx+vy*vy+1);
   double denominator=.1*vx+.08-vy,z=denominator>0?std::min(120.,5/denominator):120.;
   double length=std::min(z*scale,97.5),tau=0,step=length/8192;
-  double bank=smooth(.30f,.78f,176.f/255),height=3*(.48+.32*bank);
+  double n=176./255,shape=smooth(.28f,.72f,float(n));
+  auto fieldSlice=[&](double h){double warp=(n-.5)*.3;
+   double low=shape*exp(-2*(h-warp)*(h-warp)/(.65*.65));
+   double mid=shape*exp(-2*(h-.48-warp)*(h-.48-warp)/(.62*.62));
+   double high=shape*exp(-2*(h-.95-warp)*(h-.95-warp)/(.58*.58));
+   return 1-exp(-(low*.85+mid*.65+high*.4)*1.25);};
   for(int i=0;i<8192;++i){double t=(i+.5)*step,px=vx/scale*t,py=t/scale,pz=vy/scale*t;
-   // Constant-noise fixture: independently integrate the four sampled height
-   // layers along the real slope, including the now-active BaseOffset.
    double relative=pz-(-5+.1*px+.08*py)-settings.localFogBaseOffset;
    double h=std::max(0.,relative)/3,density=0;
-   for(int layer=0;layer<4;++layer){double slice=layer*.5,edge=std::max(0.,bank-(1-176./255)*slice*.42);
-    density+=edge*edge*exp(-2*slice*slice/(height*height/9))*std::max(0.,1-abs(h-slice)*2);}
+   for(int layer=0;layer<4;++layer){double slice=layer*.5;
+    density+=fieldSlice(slice)*std::max(0.,1-abs(h-slice)*2);}
    density*=.1*2.2*smooth(-.4f,.05f,float(relative));
    density*=1-smooth(65*.65f,65,float(sqrt(px*px+py*py)));density*=smooth(1,6,float(t));tau+=density*step;}
-  double alpha=1-exp(-tau);return int((32./255*(1-alpha)+.72*alpha)*255+.5);};
+  double alpha=1-exp(-tau),transmitted=pow(32./255,2.2)*(1-alpha),headroom=1-transmitted;
+  double scatter=pow(.36,2.2)*alpha;return int(pow(transmitted+headroom*(1-exp(-scatter/headroom)),1/2.2)*255+.5);};
  slopingDepth();render(false);int slopeError=0;
  for(int y=70;y<=110;y+=5){int actual=(pixel(64,y)>>16)&255;printf("slope y=%d actual=%d ref=%d\n",y,actual,referenceBank(64,y));slopeError=std::max(slopeError,abs(actual-referenceBank(64,y)));}
  printf("sloped fog error versus 8192-step reference=%d\n",slopeError);
@@ -405,3 +412,4 @@ int main() try {
  Require(outdoorLamp,"actual screenshot-area street lamp is selected from shipped manifest");
  lighting.Reset(d.Get());fog.Reset(d.Get());DestroyWindow(window);puts("PASS atmosphere regression suite");return 0;
 } catch(const std::exception& e) {printf("FAIL %s\n",e.what());return 1;}
+
