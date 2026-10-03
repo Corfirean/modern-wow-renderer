@@ -6,7 +6,7 @@ cl /nologo /EHsc /std:c++20 /O2 /DWIN32_LEAN_AND_MEAN tools\CityLocationRegressi
 if errorlevel 1 exit /b 1
 copy /y build\Release\d3d9.dll build\city-location-test\d3d9.dll >nul
 if not exist build\city-location-test\data mkdir build\city-location-test\data
-copy /y C:\games\Ascension\data\areas.txt build\city-location-test\data\areas.txt >nul
+copy /y data\areas.txt build\city-location-test\data\areas.txt >nul
 cd build\city-location-test
 if exist ModernWoWRenderer.log del ModernWoWRenderer.log
 if exist VolumeEffects.log del VolumeEffects.log

@@ -13,6 +13,12 @@ int main() try {
  auto create=reinterpret_cast<IDirect3D9*(WINAPI*)(UINT)>(GetProcAddress(dll,"Direct3DCreate9"));ComPtr<IDirect3D9> api;api.Attach(create(D3D_SDK_VERSION));
  HWND window=CreateWindowW(L"STATIC",L"Overlay regression",WS_OVERLAPPEDWINDOW,0,0,128,128,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
  std::filesystem::create_directories("build/overlay-preview");
+ renderer::menudiagnostics::Configure(L"build\\overlay-preview\\");
+ renderer::locationtuning::Sync(L"build\\overlay-preview\\missing\\",{571,65,4164,true},true);
+ auto& failedItem=tuningoverlay::items[1];const int originalValue=failedItem.value;failedItem.value=!originalValue;
+ if(tuningoverlay::Save(failedItem))throw std::runtime_error("Save succeeded into missing directory");
+ std::ifstream diagnostic("build/overlay-preview/MenuDiagnostics.log");std::string diagnosticText((std::istreambuf_iterator<char>(diagnostic)),{});
+ if(diagnosticText.find("SAVE FAILED")==std::string::npos||diagnosticText.find("win32=")==std::string::npos)throw std::runtime_error("Save failure missing from support log");
  for(auto height:{1080,1440,2160}) {
   int width=height*16/9;D3DPRESENT_PARAMETERS pp{};pp.Windowed=TRUE;pp.SwapEffect=D3DSWAPEFFECT_DISCARD;pp.hDeviceWindow=window;pp.BackBufferWidth=width;pp.BackBufferHeight=height;pp.BackBufferFormat=D3DFMT_A8R8G8B8;
   ComPtr<IDirect3DDevice9> device;Check(api->CreateDevice(0,D3DDEVTYPE_HAL,window,D3DCREATE_SOFTWARE_VERTEXPROCESSING,&pp,device.GetAddressOf()));

@@ -17,6 +17,8 @@ public:
     std::string AreaName() const {const auto* area=database.Area(location.areaId);return area?area->name:std::to_string(location.areaId);}
     std::vector<std::string> DebugLines() const;
     std::vector<std::string> CompactDebugLines() const;
+    std::string TuningBlockedReason() const;
+    void WriteMenuReport(const std::string& event) const;
     bool CreateOverride(bool area);
 private:
     void Retarget();

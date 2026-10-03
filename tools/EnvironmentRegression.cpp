@@ -94,6 +94,9 @@ int main() try {
  testArea=12345;Require(provider.Sample(db,true).valid,"provider accepts unknown custom area with known zone and map");testArea=87;
  testArea=0;Require(provider.Sample(db,true).valid&&provider.Sample(db,true).areaId==0,"zero subarea preserves validated zone/map without inventing AreaID");testArea=87;
  writeProvider(client.imageSize+4);provider.Configure(providerFile.wstring());Require(!provider.Verified()&&!provider.Sample(db,true).valid,"matching hash with invalid configured RVA safely disables provider");std::filesystem::remove(providerFile);
+ const auto bundledDatabase=std::filesystem::path("data/areas.txt");
+ EnvironmentDatabase bundled;Require(bundled.Load(bundledDatabase.wstring(),error)&&bundled.Authoritative()&&bundled.AreaCount()==2849,"release bundles verified Ascension location database");
+ Require(bundled.Area(10221)&&bundled.Area(10221)->parentId==1519,"bundled database includes custom Stormwind area");
  const auto actual=std::filesystem::path("build/client-research/areas.txt");
  if(std::filesystem::exists(actual)) {EnvironmentDatabase exported;Require(exported.Load(actual.wstring(),error)&&exported.AreaCount()==2849&&!exported.Authoritative(),"real Ascension custom database loads with diagnostic-only gate");}
  std::cout<<"Environment regression passed\n";return 0;
