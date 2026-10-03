@@ -6,8 +6,10 @@
 #include <array>
 #include <string>
 #include <vector>
+#include <map>
 #include "src/Environment/OverlayFont.h"
 #include "src/Environment/EnvironmentProfileManager.h"
+#include "src/Environment/MenuDiagnostics.h"
 
 namespace tuningoverlay {
 enum ItemKind { KIND_HEADER, KIND_TOGGLE, KIND_SLIDER };
@@ -15,6 +17,7 @@ struct Item { ItemKind kind; const wchar_t* section; const wchar_t* key; const c
 inline std::wstring ini;
 inline bool visible=false,f7Down=false,mouseDown=false;
 inline int hover=-1,dragItem=-1;
+inline std::string saveError;
 inline std::vector<Item> items={
  // === ATMOSPHERE & GOD RAYS ===
  {KIND_HEADER,nullptr,nullptr,"--- ATMOSPHERE & GOD RAYS ---",0,0,0,0},
@@ -106,7 +109,17 @@ inline std::vector<Item> items={
 };
 inline const std::vector<int> defaults=[](){std::vector<int> result;for(const auto& i:items)result.push_back(i.value);return result;}();
 inline void Configure(const std::wstring& base){ini=base+L"GraphicsEffects.ini";for(auto& i:items){if(i.kind==KIND_HEADER)continue;i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);}}
-inline void Save(Item& i){if(i.kind==KIND_HEADER)return;renderer::locationtuning::Save(i.section,i.key,i.value);}
+inline bool Save(Item& i){
+ if(i.kind==KIND_HEADER)return false;
+ SetLastError(0);
+ if(renderer::locationtuning::Save(i.section,i.key,i.value)){saveError.clear();return true;}
+ const DWORD error=GetLastError();
+ saveError="Save failed (Windows "+std::to_string(error)+"). Send MenuDiagnostics.log";
+ renderer::menudiagnostics::Write("SAVE FAILED control="+std::string(i.label)+" value="+std::to_string(i.value)+" win32="+std::to_string(error));
+ renderer::EnvironmentProfileManager::Instance().WriteMenuReport("save failed");
+ i.value=std::clamp(static_cast<int>(renderer::locationtuning::ReadEditorInt(i.section,i.key,defaults[&i-items.data()],ini.c_str())),i.lo,i.hi);
+ return false;
+}
 inline const std::array<unsigned char,7>& Glyph(char c){
  if(c>='a'&&c<='z')c=char(c-'a'+'A');
  static const std::array<unsigned char,7> blank{};
@@ -194,7 +207,7 @@ inline bool SelectScope(int scope){
 }
 inline bool Update(){
  DWORD pid=0;HWND window=GetForegroundWindow();GetWindowThreadProcessId(window,&pid);bool focused=pid==GetCurrentProcessId();
- bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;if(focused&&f7&&!f7Down)visible=!visible;f7Down=f7;
+ bool f7=(GetAsyncKeyState(VK_F7)&0x8000)!=0;if(focused&&f7&&!f7Down){visible=!visible;if(visible)renderer::EnvironmentProfileManager::Instance().WriteMenuReport("F7 opened");}f7Down=f7;
  if(!visible||!focused){hover=-1;dragItem=-1;mouseDown=false;return false;}
  RECT client{};GetClientRect(window,&client);
  if(!renderWidth||!renderHeight)Layout(client.right,client.bottom,window);
@@ -207,30 +220,39 @@ inline bool Update(){
  const int curHover=HitItem(px,py);
  hover=dragItem>=0?dragItem:curHover;
  const int editItem=dragItem>=0?dragItem:curHover;
+ if(down&&!mouseDown&&editItem>=0&&!renderer::locationtuning::editable&&!renderer::locationtuning::IsGlobal(items[editItem].section))renderer::EnvironmentProfileManager::Instance().WriteMenuReport("blocked control click");
  if(down&&(renderer::locationtuning::editable||(editItem>=0&&renderer::locationtuning::IsGlobal(items[editItem].section)))){
-  if(!mouseDown&&curHover>=0){auto& i=items[curHover];if(i.kind==KIND_TOGGLE){i.value=!i.value;Save(i);changed=true;}else dragItem=curHover;}
+  if(!mouseDown&&curHover>=0){auto& i=items[curHover];if(i.kind==KIND_TOGGLE){i.value=!i.value;changed=Save(i);}else dragItem=curHover;}
   if(dragItem>=0){
    auto& i=items[dragItem];const float left=PanelX()+ItemColumn(dragItem)*columnWidth*uiScale;
    float t=std::clamp((px-left-252*uiScale)/(82*uiScale),0.f,1.f);
    int value=std::clamp(i.lo+int((i.hi-i.lo)*t/i.step+.5f)*i.step,i.lo,i.hi);
-   if(value!=i.value){i.value=value;Save(i);changed=true;}
+   if(value!=i.value){i.value=value;changed=Save(i)||changed;if(!changed)dragItem=-1;}
   }
  }
  mouseDown=down;return changed;
 }
 inline void Draw(IDirect3DDevice9* d){
  if(!visible||!d)return;
- IDirect3DStateBlock9* raw=nullptr;if(FAILED(d->CreateStateBlock(D3DSBT_ALL,&raw)))return;if(FAILED(raw->Capture())){raw->Release();return;}
+ static std::map<std::string,HRESULT> lastErrors;
+ auto check=[&](HRESULT result,const char* stage){auto& previous=lastErrors[stage];if(FAILED(result)&&result!=previous)renderer::menudiagnostics::Write(std::string("DRAW FAILED ")+stage+" HRESULT="+std::to_string(result));previous=result;return SUCCEEDED(result);};
+ IDirect3DStateBlock9* raw=nullptr;if(!check(d->CreateStateBlock(D3DSBT_ALL,&raw),"CreateStateBlock"))return;if(!check(raw->Capture(),"Capture")){raw->Release();return;}
  D3DVIEWPORT9 viewport{};d->GetViewport(&viewport);D3DDEVICE_CREATION_PARAMETERS creation{};d->GetCreationParameters(&creation);
  environmentLines=renderer::EnvironmentProfileManager::Instance().CompactDebugLines();
  renderWidth=int(viewport.Width);renderHeight=int(viewport.Height);
  Layout(viewport.Width,viewport.Height,creation.hFocusWindow);
+ static int lastWidth=0,lastHeight=0;
+ if(renderWidth!=lastWidth||renderHeight!=lastHeight){
+  RECT client{};GetClientRect(creation.hFocusWindow,&client);
+  renderer::menudiagnostics::Write("LAYOUT viewport="+std::to_string(renderWidth)+"x"+std::to_string(renderHeight)+" client="+std::to_string(client.right)+"x"+std::to_string(client.bottom)+" scale="+std::to_string(uiScale));
+  lastWidth=renderWidth;lastHeight=renderHeight;
+ }
  struct Label {float x,y,right;std::string text;DWORD color;};std::vector<Label> labels;std::vector<V> v;
  float x=PanelX(),y=PanelY(),w=columns*columnWidth*uiScale,row=controlRow*uiScale;
  auto label=[&](float xx,float yy,const std::string& text,DWORD color,float right){labels.push_back({xx,yy,right,text,color});};
  Rect(v,x,y,w,panelHeight,0xf5121820);Rect(v,x,y,w,30*uiScale,0xff1b3340);
  label(x+12*uiScale,y+5*uiScale,"Modern WoW Renderer",0xff8effbb,x+w);
- label(x+w-220*uiScale,y+5*uiScale,renderer::locationtuning::editable?"Local preset / F7 close":"Read only / F7 close",0xffb5cbd6,x+w-12*uiScale);
+ label(x+w-220*uiScale,y+5*uiScale,renderer::locationtuning::editable?"Local preset / F7 close":"Local locked / F7 close",0xffb5cbd6,x+w-12*uiScale);
  for(size_t i=0;i<environmentLines.size();++i)label(x+12*uiScale,y+(36+23*i)*uiScale,environmentLines[i],i?0xffdce5ea:0xffffdc82,x+w-12*uiScale);
  const auto& manager=renderer::EnvironmentProfileManager::Instance();
  const bool zone=renderer::locationtuning::editZone||!renderer::locationtuning::active.areaId;
@@ -239,7 +261,7 @@ inline void Draw(IDirect3DDevice9* d){
  Rect(v,x+595*uiScale,y+132*uiScale,443*uiScale,25*uiScale,!zone?0xff246b47:0xff26343b);
  label(x+162*uiScale,y+135*uiScale,"Entire zone - "+manager.ZoneName(),0xffdce5ea,x+578*uiScale);
  label(x+602*uiScale,y+135*uiScale,renderer::locationtuning::active.areaId?"This subarea - "+manager.AreaName():"Subarea unavailable (Area 0)",0xffdce5ea,x+w-12*uiScale);
- label(x+12*uiScale,y+165*uiScale,"Subarea settings override zone settings.",0xffb5cbd6,x+w-12*uiScale);
+ label(x+12*uiScale,y+165*uiScale,!saveError.empty()?saveError:renderer::locationtuning::editable?"Subarea settings override zone settings.":"Local locked: "+manager.TuningBlockedReason()+" | Send MenuDiagnostics.log",0xffb5cbd6,x+w-12*uiScale);
  for(int column=0;column<columns;++column){
   float xx=x+column*columnWidth*uiScale;
   if(column)Rect(v,xx-2*uiScale,ControlsY(),uiScale,panelHeight-196*uiScale,0xff2a3d48);
@@ -255,6 +277,7 @@ inline void Draw(IDirect3DDevice9* d){
   }
  }
  bool hasFont=font.Ensure(d,std::max(12,int(std::round(16*uiScale))));
+ static bool fontFailed=false;if(!hasFont&&!fontFailed)renderer::menudiagnostics::Write("FONT FAILED: using bitmap fallback");fontFailed=!hasFont;
  if(!hasFont)for(const auto& l:labels)BitmapText(v,l.x,l.y,l.text.c_str(),l.color,1.6f*uiScale);
  d->SetVertexShader(nullptr);d->SetPixelShader(nullptr);d->SetFVF(D3DFVF_XYZRHW|D3DFVF_DIFFUSE);d->SetTexture(0,nullptr);
  d->SetTextureStageState(0,D3DTSS_COLOROP,D3DTOP_SELECTARG1);d->SetTextureStageState(0,D3DTSS_COLORARG1,D3DTA_DIFFUSE);
@@ -263,8 +286,8 @@ inline void Draw(IDirect3DDevice9* d){
  d->SetRenderState(D3DRS_LIGHTING,FALSE);d->SetRenderState(D3DRS_FOGENABLE,FALSE);d->SetRenderState(D3DRS_ALPHATESTENABLE,FALSE);
  d->SetRenderState(D3DRS_STENCILENABLE,FALSE);d->SetRenderState(D3DRS_SCISSORTESTENABLE,FALSE);d->SetRenderState(D3DRS_CULLMODE,D3DCULL_NONE);
  d->SetRenderState(D3DRS_ALPHABLENDENABLE,TRUE);d->SetRenderState(D3DRS_SRCBLEND,D3DBLEND_SRCALPHA);d->SetRenderState(D3DRS_DESTBLEND,D3DBLEND_INVSRCALPHA);
- d->SetRenderState(D3DRS_COLORWRITEENABLE,15);d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(v.size()/3),v.data(),sizeof(V));
+ d->SetRenderState(D3DRS_COLORWRITEENABLE,15);check(d->DrawPrimitiveUP(D3DPT_TRIANGLELIST,UINT(v.size()/3),v.data(),sizeof(V)),"DrawPrimitiveUP");
  if(hasFont)for(const auto& l:labels)font.Draw(d,l.x,l.y,l.text,l.color,l.right);
- raw->Apply();raw->Release();
+ check(raw->Apply(),"RestoreState");raw->Release();
 }
 }

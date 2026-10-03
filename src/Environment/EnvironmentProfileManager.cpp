@@ -1,4 +1,5 @@
 #include "EnvironmentProfileManager.h"
+#include "MenuDiagnostics.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -85,17 +86,23 @@ EnvironmentProfileManager& EnvironmentProfileManager::Instance() {static Environ
 void EnvironmentProfileManager::Log(const std::string& message) const {if(!basePath.empty())std::ofstream(std::filesystem::path(basePath+L"ModernWoWRenderer.log"),std::ios::app)<<"[Environment] "<<message<<'\n';}
 void EnvironmentProfileManager::Configure(const std::wstring& base) {
     basePath=base;std::string error;
+    menudiagnostics::Configure(base);
     if(!database.Load(base+L"data\\areas.txt",error))Log(error+"; location validation unavailable");
     else Log("Area database loaded: "+std::to_string(database.AreaCount()));
     Reload();Log("Client SHA256="+provider.Client().sha256+" timestamp="+std::to_string(provider.Client().timestamp));
+    WriteMenuReport("configured");
 }
 void EnvironmentProfileManager::Reload() {
+    // F12 must also recover after installing/fixing the location database.
+    std::string databaseError;
+    if(!database.Load(basePath+L"data\\areas.txt",databaseError))menudiagnostics::Write("DATABASE reload failed: "+databaseError);
     std::ifstream input{std::filesystem::path(basePath+L"EnvironmentProfiles.ini")};std::ostringstream text;text<<input.rdbuf();
     EnvironmentConfiguration next;std::string error;
-    if(!input||!ParseEnvironmentConfiguration(text.str(),next,error)) {Log("Reload rejected; retaining previous config: "+error);return;}
+    if(!input||!ParseEnvironmentConfiguration(text.str(),next,error)) {Log("Reload rejected; retaining previous config: "+error);menudiagnostics::Write("CONFIG reload rejected: "+(input?error:"EnvironmentProfiles.ini missing/unreadable"));return;}
     config=std::move(next);provider.Configure(basePath+L"EnvironmentProfiles.ini");
     Log(provider.Status());debounce.Reset();lastPoll=0;
     Retarget();
+    WriteMenuReport("reload");
 }
 void EnvironmentProfileManager::Retarget() {
     resolved=ResolveEnvironment(config,location);
@@ -114,6 +121,7 @@ void EnvironmentProfileManager::Update(uint64_t now,bool world) {
         if(debounce.Confirm(sample,location,now,config.debounceMs)) {
             const auto revision=location.revision+1;location=sample;location.revision=revision;
             Log(location.valid?"Location changed: Map="+std::to_string(location.mapId)+" Zone="+std::to_string(location.zoneId)+" Area="+std::to_string(location.areaId):"Location unavailable; Default environment");Retarget();
+            WriteMenuReport("location changed");
         }
     }
     progress=std::clamp(float(now-blendStart)/(config.transitionSeconds*1000),0.f,1.f);
@@ -147,8 +155,24 @@ std::vector<std::string> EnvironmentProfileManager::CompactDebugLines() const {
  else lines.push_back("Location unavailable  |  Raw Map / Zone / Area: "+std::to_string(raw.mapId)+" / "+std::to_string(raw.zoneId)+" / "+std::to_string(raw.areaId));
  lines.push_back("Profile: "+resolved.profile+"  |  Source: "+resolved.source+"  |  Transition: "+std::to_string(int(progress*100))+"%");
  lines.push_back("Location: "+provider.ValidationStatus()+"  |  "+provider.Status());
- lines.push_back(provider.Verified()&&database.Authoritative()?"Automatic environment active":"Automatic environment: pending location / database verification");
+ lines.push_back(provider.Verified()&&database.Authoritative()&&location.valid?"Automatic environment active":"Automatic environment: pending location / database verification");
  return lines;
+}
+std::string EnvironmentProfileManager::TuningBlockedReason() const {
+    if(!provider.Verified())return provider.Status();
+    if(!database.Authoritative())return database.AreaCount()?"Area database is diagnostic-only":"Missing/invalid data/areas.txt";
+    if(!location.valid)return provider.ValidationStatus();
+    return {};
+}
+void EnvironmentProfileManager::WriteMenuReport(const std::string& event) const {
+    menudiagnostics::Write("REPORT "+event+" SHA256="+provider.Client().sha256+" areas="+std::to_string(database.AreaCount())+" authoritative="+std::to_string(database.Authoritative()));
+    menudiagnostics::Write("Local settings: "+(TuningBlockedReason().empty()?std::string("editable"):TuningBlockedReason()));
+    const auto path=basePath+L"EnvironmentProfiles.ini";
+    for(const wchar_t* key:{L"ExeSHA256",L"MapRva",L"ZoneRva",L"AreaRva",L"VerifiedInWorld"}) {
+        wchar_t value[128]{};GetPrivateProfileStringW(L"LocationProvider",key,L"<missing>",value,128,path.c_str());
+        menudiagnostics::Write("CONFIG "+std::string(key,key+wcslen(key))+"="+std::string(value,value+wcslen(value)));
+    }
+    for(const auto& line:CompactDebugLines())menudiagnostics::Write(line);
 }
 bool EnvironmentProfileManager::CreateOverride(bool area) {
     if(!location.valid)return false;

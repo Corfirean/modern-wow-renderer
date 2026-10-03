@@ -9,17 +9,21 @@ void WoWLocationProvider::Configure(const std::wstring& path) {
     // 12340 RVAs are documentation, never an automatic unknown-build fallback.
     wchar_t expected[80]{};GetPrivateProfileStringW(L"LocationProvider",L"ExeSHA256",L"",expected,80,path.c_str());
     std::string fingerprint;for(const wchar_t* c=expected;*c;++c)fingerprint+=char(*c);
-    if(client.sha256.empty()||fingerprint!=client.sha256) {status="Unrecognized executable fingerprint; Default environment";return;}
+    for(char& c:fingerprint)if(c>='A'&&c<='F')c=char(c-'A'+'a');
+    // A blank shipped configuration uses only this exact, live-verified build.
+    // Explicit custom configurations keep their original verification rules.
+    const bool bundled=fingerprint.empty()&&client.sha256=="e7c2a69cb86804eb9e21254b7b45c6a03e532d8b8f94451d9e0855f7535f97c6";
+    if(!bundled&&(client.sha256.empty()||fingerprint!=client.sha256)) {status="Unrecognized executable fingerprint; Default environment";return;}
     auto read=[&](const wchar_t* key)->uintptr_t {
         wchar_t value[64]{};GetPrivateProfileStringW(L"LocationProvider",key,L"",value,64,path.c_str());
         wchar_t* end=nullptr;errno=0;const auto n=wcstoull(value,&end,0);
         return errno||end==value||*end||n>std::numeric_limits<uintptr_t>::max()?0:static_cast<uintptr_t>(n);
     };
-    offsets={read(L"MapRva"),read(L"ZoneRva"),read(L"AreaRva")};
+    offsets=bundled?WoWLocationOffsets{0x7D088C,0x7D080C,0x7D0810}:WoWLocationOffsets{read(L"MapRva"),read(L"ZoneRva"),read(L"AreaRva")};
     uint32_t probe=0;
     if(!offsets.map||!offsets.zone||!offsets.area||offsets.map==offsets.zone||offsets.map==offsets.area||offsets.zone==offsets.area||!client.Read(offsets.map,&probe,4)||!client.Read(offsets.zone,&probe,4)||!client.Read(offsets.area,&probe,4)) {status="Invalid/unreadable location RVAs; Default environment";return;}
-    available=true;verified=GetPrivateProfileIntW(L"LocationProvider",L"VerifiedInWorld",0,path.c_str())!=0;
-    status=verified?"Fingerprint matched; in-world verified RVAs":"Fingerprint matched; diagnostic RVAs (effects locked)";
+    available=true;verified=bundled||GetPrivateProfileIntW(L"LocationProvider",L"VerifiedInWorld",0,path.c_str())!=0;
+    status=bundled?"Supported Ascension build; bundled verified RVAs":verified?"Fingerprint matched; in-world verified RVAs":"Fingerprint matched; diagnostic RVAs (effects locked)";
 }
 LocationContext WoWLocationProvider::Sample(const EnvironmentDatabase& db,bool world) const {
     LocationContext a,b;
