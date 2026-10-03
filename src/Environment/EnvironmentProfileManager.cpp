@@ -168,9 +168,15 @@ void EnvironmentProfileManager::WriteMenuReport(const std::string& event) const 
     menudiagnostics::Write("REPORT "+event+" SHA256="+provider.Client().sha256+" areas="+std::to_string(database.AreaCount())+" authoritative="+std::to_string(database.Authoritative()));
     menudiagnostics::Write("Local settings: "+(TuningBlockedReason().empty()?std::string("editable"):TuningBlockedReason()));
     const auto path=basePath+L"EnvironmentProfiles.ini";
+    auto utf8=[](const wchar_t* text) {
+        const int size=WideCharToMultiByte(CP_UTF8,0,text,int(wcslen(text)),nullptr,0,nullptr,nullptr);
+        std::string result(size,'\0');
+        if(size)WideCharToMultiByte(CP_UTF8,0,text,int(wcslen(text)),result.data(),size,nullptr,nullptr);
+        return result;
+    };
     for(const wchar_t* key:{L"ExeSHA256",L"MapRva",L"ZoneRva",L"AreaRva",L"VerifiedInWorld"}) {
         wchar_t value[128]{};GetPrivateProfileStringW(L"LocationProvider",key,L"<missing>",value,128,path.c_str());
-        menudiagnostics::Write("CONFIG "+std::string(key,key+wcslen(key))+"="+std::string(value,value+wcslen(value)));
+        menudiagnostics::Write("CONFIG "+utf8(key)+"="+utf8(value));
     }
     for(const auto& line:CompactDebugLines())menudiagnostics::Write(line);
 }
